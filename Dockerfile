@@ -22,10 +22,10 @@ COPY allow_x11_display_docker_openvino.patch /usr/local/lib/python3.10/dist-pack
 RUN cd /usr/local/lib/python3.10/dist-packages/ultralytics/utils; patch < allow_x11_display_docker_openvino.patch
 COPY allow_openvino_device_change.patch /usr/local/lib/python3.10/dist-packages/ultralytics/nn
 RUN cd /usr/local/lib/python3.10/dist-packages/ultralytics/nn; patch < allow_openvino_device_change.patch
-COPY allow_openvino_npu_quant_change.patch /usr/local/lib/python3.10/dist-packages/ultralytics/nn
-RUN cd /usr/local/lib/python3.10/dist-packages/ultralytics/nn; patch < allow_openvino_npu_quant_change.patch
+COPY allow_openvino_npu_quant_change.patch2 /usr/local/lib/python3.10/dist-packages/ultralytics/nn
+RUN cd /usr/local/lib/python3.10/dist-packages/ultralytics/nn; patch < allow_openvino_npu_quant_change.patch2
 
 RUN mkdir npu-drivers; cd npu-drivers; wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-driver-compiler-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb; wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-fw-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb; wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-level-zero-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb; wget https://github.com/oneapi-src/level-zero/releases/download/v1.10.0/level-zero_1.10.0+u22.04_amd64.deb; dpkg -i *.deb
 RUN cd /opt/intel/openvino/samples/cpp; ./build_samples.sh
 
-
+COPY run-camera.sh .

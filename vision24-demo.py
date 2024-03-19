@@ -16,7 +16,7 @@ from queue import Queue
 import time
 from paho.mqtt import client as mqtt_client
 broker = 'broker.hivemq.com'
-#broker = '198.175.88.142'
+broker = '198.175.88.142'
 port = 1883
 topic = "/roi/bottle-1/describe_the_item_in_the_image"
 client_id = 'test-client/`'
@@ -138,7 +138,7 @@ def publish(client, img_bytes, item_id, prompt):
     sts = res[0]
     if sts == 0:
         pass
-        #print("JPG sent successfully")
+        print("JPG sent successfully")
     else:
         print("JPG send failed")
 
@@ -444,8 +444,8 @@ def clear_shopping_cart():
 window = tkinter.Tk()
 
 # Main Window Rendering
-windowHeight=900
-windowWidth=1600
+windowHeight=1000
+windowWidth=1800
 startingRowIdxShoppingCart=1
 
 window.title("Vision Self-Checkout Demo")
@@ -518,7 +518,7 @@ print("capturing video from: ", source)
 
 print("Running ", model_name, " with OpenVINO" if use_openvino else "")
 sfilter = ["banana", "apple", "orange", "broccoli", "carrot", "bottle"]
-
+vidPicture = None
 while cap.isOpened():
     annotated_frame = None
     #window.update_idletasks()
@@ -534,7 +534,7 @@ while cap.isOpened():
     while not tracked_mqtt_results.empty():
         trackid, res = tracked_mqtt_results.pop()
         #resArr = res.split("|")
-        print(trackid, res[0], res[1])
+        #print(trackid, res[0], res[1])
         updateGenAIResult(tabGenAIView, trackid, res, True)
 
 
@@ -627,12 +627,15 @@ while cap.isOpened():
         imgt = cv2.merge((r,g,b))
         imgt = Image.fromarray(imgt)
         imgtkk = ImageTk.PhotoImage(image=imgt)
-        vidPicture = tkinter.Label(videoFrame, text=" ", image=imgtkk)
-        vidPicture.image = imgtkk
-        #vidPicture.grid(row=startingRowIdxShoppingCart,column=0, sticky=tkinter.W)
+        if not vidPicture is None:
+            vidPicture.configure(image = imgtkk)
+            vidPicture.image = imgtkk
+        else:
+            vidPicture = tkinter.Label(videoFrame, text=" ") #, image=imgtkk)
+        #vidPicture.image = imgtkk
         vidPicture.grid(row=0,column=0, sticky=tkinter.W)
-        #vidPicture.update_idletasks()
-        #vidPicture.update()
+        vidPicture.update_idletasks()
+        vidPicture.update()
         window.update_idletasks()
         window.update()
 
