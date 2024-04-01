@@ -369,7 +369,10 @@ def addGenAIResult(root, item_img, item_id, item_prompt, img_bytes):
 
 
 def updateGenAIResult(ui_frame, item_id, item_result, is_first):
-    found_ui = ui_frame.nametowidget(str(item_id)) if is_first else ui_frame
+    try:
+        found_ui = ui_frame.nametowidget(str(item_id)) if is_first else ui_frame
+    except:
+        return
     #print(found_ui, found_ui._name)
 
     if found_ui._name == "lblres"+str(item_id):
