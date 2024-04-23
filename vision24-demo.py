@@ -2,6 +2,7 @@ import os
 import sys
 import tkinter as tkinter
 import cv2
+import time
 from tkinter import ttk
 from PIL import Image, ImageTk
 import tkinter.scrolledtext as tks
@@ -162,12 +163,12 @@ def do_update_annotated_frame(annotated_frame, xywh, label) -> None:
 
 
 # MQTT
-client = connect_mqtt()
-subscribe(client)
-client.loop_start()
-while ready != 1:
-    time.sleep(1)
-print("Connecting to broker ")
+#client = connect_mqtt()
+#subscribe(client)
+#client.loop_start()
+#while ready != 1:
+#    time.sleep(1)
+#print("Connecting to broker ")
 
 
 # Tracked objects ... need to refactor into a single cache
@@ -415,6 +416,15 @@ def addShoppingCartItem(cartFrame, startingRowIdxShoppingCart, itemText, itemImg
     startingRowIdxShoppingCart = startingRowIdxShoppingCart + 1
     return startingRowIdxShoppingCart
 
+def do_bit_on_roi(cls_model, roi, cls_imgsz, output_layer):
+    import tensorflow.compat.v2 as tf
+    resized_roi = cv2.resize(roi, (64,64), interpolation=cv2.INTER_LINEAR) 
+    resized_roi = tf.reshape(resized_roi, [1,64,64,3])
+    result_infer = cls_model([resized_roi])[output_layer]
+    #print(result_infer)
+    #print("Done bit infer!")
+    #result_index = np.argmax(result_infer)
+    
 
 def clear_shopping_cart():
     global genAiItems, rowGen, colGen,x,y
@@ -459,12 +469,12 @@ window.geometry(str(windowWidth) + 'x' + str(windowHeight))
 # Tab Widget
 tabWidget = ttk.Notebook(window)
 tabCameraView = tkinter.Frame(tabWidget)
-tabGenAIView = tkinter.Frame(tabWidget, width=windowWidth, height=windowHeight)
-tabGenAIView.pack()
-tabGenAIView.pack_propagate(0)
+#tabGenAIView = tkinter.Frame(tabWidget, width=windowWidth, height=windowHeight)
+#tabGenAIView.pack()
+#tabGenAIView.pack_propagate(0)
 
 tabWidget.add(tabCameraView, text='Main')
-tabWidget.add(tabGenAIView, text='GenAI-Details')
+#tabWidget.add(tabGenAIView, text='GenAI-Details')
 tabWidget.pack(expand=1, fill="both")
 
 # Main View
@@ -485,7 +495,7 @@ cartFrame.grid_propagate(0)
 #cartScrollbar = ttk.Scrollbar(tabCameraView, orient="vertical")
 #cartScrollbar.pack(fill=tkinter.Y, side=tkinter.RIGHT, expand=False)
 shopping_cart_ui = cartFrame
-gen_ai_ui = tabGenAIView
+#gen_ai_ui = tabGenAIView
 
 
 videoFrame.grid(         row=0, column=0, sticky=tkinter.NW, pady=10, rowspan=2)
@@ -508,6 +518,19 @@ if use_openvino:
     #path = cls_model.export(format='openvino', imgsz=cls_imgsz)
     #cls_model = YOLO(path)
 
+# use Bit Model instead
+from openvino.runtime import Core
+ie = Core()
+cls_model = ie.read_model(model="BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml")
+cls_model.reshape({0:[1,64,64,3]})
+
+#from openvino.preprocess import PrePostProcessor
+#import openvino
+#ppp = PrePostProcessor(cls_model)
+#ppp.input(0).tensor().set_shape([1, 64,64,3]).set_layout(openvino.Layout('NCHW'))
+#compiled_model = ppp.build() #ie.compile_model(model=cls_model, device_name="GPU")
+compiled_model = ie.compile_model(model=cls_model, device_name="GPU")
+output_layer = compiled_model.output(0)
 
 frame_count = 0
 skip_frame_reclassify = False
@@ -527,6 +550,8 @@ while cap.isOpened():
     #window.update_idletasks()
     #window.update()
 
+    start_time = time.time()
+
     success, frame = cap.read()
 
     if not success:
@@ -538,7 +563,7 @@ while cap.isOpened():
         trackid, res = tracked_mqtt_results.pop()
         #resArr = res.split("|")
         #print(trackid, res[0], res[1])
-        updateGenAIResult(tabGenAIView, trackid, res, True)
+        #updateGenAIResult(tabGenAIView, trackid, res, True)
 
 
     results = model.track(frame, tracker=tracker, imgsz=det_imgsz, persist=True, verbose=False)
@@ -562,8 +587,6 @@ while cap.isOpened():
             annotated_frame = result.plot()
 
         #print("No hand in pic-->", result_label, "person" in result_label)
-
-
 
         # Add any GenAI results and render them in GenAI widget(s)
         #while not tracked_mqtt_results.empty():
@@ -590,6 +613,7 @@ while cap.isOpened():
             if not tracked_object:
                 # for cls
                 # result_label = do_classification_on_roi(cls_model, roi, cls_imgsz)
+                result_label = do_bit_on_roi(compiled_model, roi, cls_imgsz,output_layer)
 
                 objTime = time.time()
                 tracked_objects.put(track_id, result_label)
@@ -605,8 +629,8 @@ while cap.isOpened():
                     ret, jpgImg = cv2.imencode('.jpg', roi)
                     startingRowIdxShoppingCart = addShoppingCartItem(cartFrame, startingRowIdxShoppingCart,
                                                                      item_label, roi)
-                    publish(client, jpgImg.tobytes(), str(track_id), "describe the item in the image")
-                    addGenAIResult(tabGenAIView, roi, track_id, "describe the item in the image", jpgImg)
+                    #publish(client, jpgImg.tobytes(), str(track_id), "describe the item in the image")
+                    #addGenAIResult(tabGenAIView, roi, track_id, "describe the item in the image", jpgImg)
                     tracked_objects_state.put(track_id, 1)
 
             # only need if using cls
@@ -617,6 +641,9 @@ while cap.isOpened():
 
     # Skip reclassification based on tracked objects and interval specified
     skip_frame_reclassify = frame_count % reclassify_interval != 0
+
+    elapsed_time = time.time() - start_time
+    print("Seconds taken for pipeline: ", elapsed_time)
 
     # Display the annotated frame
     if show_gui:
