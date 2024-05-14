@@ -14,7 +14,7 @@ RUN apt -y update && apt install -y wget && \
     rm -rf /var/lib/apt/lists/* && rm -rf /tmp/*
 
 #RUN wget -O sample.mp4 https://github.com/intel-iot-devkit/sample-videos/raw/master/store-aisle-detection.mp4 
-RUN wget -O sample.mp4 https://download.pexels.com/vimeo/421906504/pexels-karolina-grabowska-4465029.mp4?width=1920
+#RUN wget -O sample.mp4 https://download.pexels.com/vimeo/421906504/pexels-karolina-grabowska-4465029.mp4?width=1920
 RUN pip install "paho-mqtt<2.0.0" ultralytics==8.1.29
 RUN pip install "mpmath<1.4.0"
 COPY vision24-demo.py .

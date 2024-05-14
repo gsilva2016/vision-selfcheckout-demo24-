@@ -14,10 +14,15 @@ import argparse
 import numpy as np
 from queue import Queue
 
+import pyrealsense2 as rs
+
+import tensorflow.compat.v2 as tf
+
 import time
 from paho.mqtt import client as mqtt_client
 broker = 'broker.hivemq.com'
 broker = '198.175.88.142'
+broker = ''
 port = 1883
 topic = "/roi/bottle-1/describe_the_item_in_the_image"
 client_id = 'test-client/`'
@@ -417,7 +422,6 @@ def addShoppingCartItem(cartFrame, startingRowIdxShoppingCart, itemText, itemImg
     return startingRowIdxShoppingCart
 
 def do_bit_on_roi(cls_model, roi, cls_imgsz, output_layer):
-    import tensorflow.compat.v2 as tf
     resized_roi = cv2.resize(roi, (64,64), interpolation=cv2.INTER_LINEAR) 
     resized_roi = tf.reshape(resized_roi, [1,64,64,3])
     result_infer = cls_model([resized_roi])[output_layer]
@@ -524,39 +528,89 @@ ie = Core()
 cls_model = ie.read_model(model="BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml")
 cls_model.reshape({0:[1,64,64,3]})
 
-#from openvino.preprocess import PrePostProcessor
-#import openvino
-#ppp = PrePostProcessor(cls_model)
-#ppp.input(0).tensor().set_shape([1, 64,64,3]).set_layout(openvino.Layout('NCHW'))
-#compiled_model = ppp.build() #ie.compile_model(model=cls_model, device_name="GPU")
 compiled_model = ie.compile_model(model=cls_model, device_name="GPU")
 output_layer = compiled_model.output(0)
 
 frame_count = 0
 skip_frame_reclassify = False
-cap = cv2.VideoCapture(source)
-if "/dev/video" in source:
-    print("Requesting 1280x720 camera resolution")
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+#cap = cv2.VideoCapture(source)
+#if "/dev/video" in source:
+#    print("Requesting 1280x720 camera resolution")
+#    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+#    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-print("capturing video from: ", source)
+ctx = rs.context()
+devices = ctx.query_devices()
+#for dev in devices:
+#    dev.hardware_reset()
+#    time.sleep(5)
+
+pipe = rs.pipeline()
+cfg = rs.config()
+serial_num2 = '130322272768' # d405
+serial_num3 = '130322273236' # 
+serial_num = '130322272045'
+
+cfg2 = rs.config()
+cfg3 = rs.config()
+pipe2 = rs.pipeline()
+pipe3 = rs.pipeline()
+cfg2.enable_device(serial_num2)
+cfg2.enable_stream(rs.stream.color, 1280,720, rs.format.bgr8, 5)
+cfg2.enable_stream(rs.stream.depth, 1280,720, rs.format.z16, 5)
+profile2 = pipe2.start(cfg2)
+
+cfg3.enable_device(serial_num3)
+cfg3.enable_stream(rs.stream.color, 1280,720, rs.format.bgr8, 5)
+cfg3.enable_stream(rs.stream.depth, 1280,720, rs.format.z16, 5)
+profile3 = pipe3.start(cfg3)
+
+cfg.enable_device(serial_num)
+cfg.enable_stream(rs.stream.color, 1280,720, rs.format.bgr8, 5)
+cfg.enable_stream(rs.stream.depth, 1280,720, rs.format.z16, 5)
+profile = pipe.start(cfg)
+
+
+# Skip 5 first frames to give auto-exposure time to adjust
+for t in range(5):
+    pipe.wait_for_frames()
+    pipe2.wait_for_frames()
+    pipe3.wait_for_frames()
+
+#print("capturing video from: ", source)
 
 print("Running ", model_name, " with OpenVINO" if use_openvino else "")
 sfilter = ["banana", "apple", "orange", "broccoli", "carrot", "bottle"]
 vidPicture = None
-while cap.isOpened():
+#while cap.isOpened():
+frameset = pipe.wait_for_frames()
+frameset2 = pipe2.wait_for_frames()
+frameset3 = pipe3.wait_for_frames()
+color_frame = frameset.get_color_frame()
+depth_frame = frameset.get_depth_frame()
+color_frame2 = frameset2.get_color_frame()
+#depth_frame2 = frameset2.get_depth_frame()
+color_frame3 = frameset3.get_color_frame()
+#depth_frame3 = frameset3.get_depth_frame()
+
+while color_frame and depth_frame:
     annotated_frame = None
     #window.update_idletasks()
     #window.update()
 
     start_time = time.time()
 
-    success, frame = cap.read()
+    #success, frame = cap.read()
+    #if not success:
+    #    print("Could not read any frames. Quitting.")
+    #    break
 
-    if not success:
-        print("Could not read any frames. Quitting.")
-        break
+    # Convert images to numpy arrays
+    #depth_image = np.asanyarray(depth_frame.get_data())
+    frame = np.asanyarray(color_frame.get_data())
+    frame2 = np.asanyarray(color_frame2.get_data())
+    frame3 = np.asanyarray(color_frame3.get_data())
+
 
     # Add any GenAI results and render them in GenAI widget(s)
     while not tracked_mqtt_results.empty():
@@ -567,6 +621,8 @@ while cap.isOpened():
 
 
     results = model.track(frame, tracker=tracker, imgsz=det_imgsz, persist=True, verbose=False)
+    result2 = model(frame2, imgsz=det_imgsz, verbose=False)
+    result3 = model(frame3, imgsz=det_imgsz, verbose=False)
     send_lvlm_processing = True
 
     for result in results:
@@ -600,6 +656,7 @@ while cap.isOpened():
             c, conf, id = int(box.cls), float(box.conf), None if box.id is None else int(box.id.item())
 
             roi = save_one_box(box.xyxy, result.orig_img.copy(),BGR=True, save=False)
+           
             #result.save_crop("/savedir", str(track_id) + ".jpg")
 
             tracked_object = tracked_objects.get(track_id)
@@ -614,6 +671,8 @@ while cap.isOpened():
                 # for cls
                 # result_label = do_classification_on_roi(cls_model, roi, cls_imgsz)
                 result_label = do_bit_on_roi(compiled_model, roi, cls_imgsz,output_layer)
+                result_label2 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
+                result_label3 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
 
                 objTime = time.time()
                 tracked_objects.put(track_id, result_label)
@@ -643,7 +702,8 @@ while cap.isOpened():
     skip_frame_reclassify = frame_count % reclassify_interval != 0
 
     elapsed_time = time.time() - start_time
-    print("Seconds taken for pipeline: ", elapsed_time)
+    if frame_count % 5 == 0:
+        print("Seconds taken for pipeline: ", elapsed_time)
 
     # Display the annotated frame
     if show_gui:
@@ -672,6 +732,20 @@ while cap.isOpened():
     # Break the loop if 'q' is pressed
     #if cv2.waitKey(1) & 0xFF == ord("q"):
     #    break
+    try:
+        frameset = pipe.wait_for_frames()
+        frameset2 = pipe2.wait_for_frames()
+        frameset3 = pipe3.wait_for_frames()
+        color_frame = frameset.get_color_frame()
+        depth_frame = frameset.get_depth_frame()
+
+        color_frame2 = frameset2.get_color_frame()
+        color_frame3 = frameset3.get_color_frame()
+    except:
+        print("camera error...restart needed.")
+        #for dev in devices:
+        #    dev.hardware_reset()
+        #    time.sleep(1)
 
 
 ################
