@@ -18,6 +18,11 @@ import pyrealsense2 as rs
 
 import tensorflow.compat.v2 as tf
 
+# ov direct from yolov8-object-det notebook
+import torch
+from ultralytics.utils import ops
+from typing import Tuple, Dict
+
 import weaviate
 import base64
 
@@ -45,6 +50,7 @@ parser.add_argument("--use_openvino", default=True, action="store_true")
 parser.add_argument("--reclassify_interval", nargs="?", type=int, default=1)
 parser.add_argument("--max_tracked_objects", nargs="?", type=int, default=20)
 parser.add_argument("--show", default=False, action="store_true")
+# 384, 640
 parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,640])
 parser.add_argument("--cls_imgsz", type=int, nargs='+', default=[224,224])
 
@@ -101,6 +107,12 @@ class timed_tracked_object:
         self.trackid = trackid
         self.label = label
 
+class Box:
+    def __init__(self, xyxy, conf, cls):
+        self.xyxy = xyxy
+        self.conf = conf
+        self.cls = cls
+        self.id = None
 
 def on_connect(client, userdata, flags, rc):
     global ready
@@ -152,22 +164,39 @@ def publish(client, img_bytes, item_id, prompt):
     else:
         print("JPG send failed")
 
-def do_update_annotated_frame(annotated_frame, xywh, label) -> None:
-    x = int(xywh[0, 0])
-    y = int(xywh[0, 1])
-    w = int(xywh[0, 2])
-    h = int(xywh[0, 3])
+def do_update_annotated_frame_detection(annotated_frame, det_imgsz, xyxy, label) -> None:
+    #print("----------->: ", label, " ",  xyxy[0], " " , xyxy[1], " ", xyxy[2], " " , xyxy[3], " ", annotated_frame.shape)
+
+    scaleX = annotated_frame.shape[1] / det_imgsz[1]
+    scaleY = annotated_frame.shape[0] / det_imgsz[0]
+    scaleX = 1
+    scaleY = 1
+    #scaleX =1
+    #scaleY = 1
+    x = int(xyxy[0] * scaleX)
+    y = int(xyxy[1] * scaleY)
+    w = int(xyxy[2] * scaleX)
+    h = int(xyxy[3] * scaleY)
+
+    #print("----->:  " , x, " ", y, " ", w, " ", h, annotated_frame.shape, " " , det_imgsz)
 
     cv2.putText(
         annotated_frame,
         label,
-        (x+5, y),
+        (x, y),
         0,
         1, # SF
-        (255, 255, 255),  # Text Color
+        (0, 0, 255),  # Text Color
         thickness=3,      # Text thickness
         lineType=cv2.LINE_AA
     )
+
+    cv2.rectangle(annotated_frame, 
+            (x,y),
+            (w,h), 
+            (0,0,255), 
+            thickness = 3
+    ) 
     #return np.asarray(img)
 
 
@@ -434,12 +463,55 @@ def do_weaviate_resnet50_on_roi(roi):
             ).with_near_image(
                     sourceImage, encode=False
             ).with_limit(1).do()
-    print("weaviate_result is: ")
-    print(weaviate_results)
+    #print("weaviate_result is: ")
+    #print(weaviate_results)
     for res in weaviate_results:
         if len(weaviate_results["data"]["Get"]["Bottle"]) > 0:
             return weaviate_results["data"]["Get"]["Bottle"][0]["brand"]
     return "unknown"
+
+def postprocess(
+    pred_boxes: np.ndarray,
+    input_hw: Tuple[int, int],
+    orig_img: np.ndarray,
+    min_conf_threshold: float = 0.5,
+    nms_iou_threshold: float = 0.7,
+    agnosting_nms: bool = False,
+    max_detections: int = 30,
+):
+    """
+    YOLOv8 model postprocessing function. Applied non maximum supression algorithm to detections and rescale boxes to original image size
+    Parameters:
+        pred_boxes (np.ndarray): model output prediction boxes
+        input_hw (np.ndarray): preprocessed image
+        orig_image (np.ndarray): image before preprocessing
+        min_conf_threshold (float, *optional*, 0.25): minimal accepted confidence for object filtering
+        nms_iou_threshold (float, *optional*, 0.45): minimal overlap score for removing objects duplicates in NMS
+        agnostic_nms (bool, *optiona*, False): apply class agnostinc NMS approach or not
+        max_detections (int, *optional*, 300):  maximum detections after NMS
+    Returns:
+       pred (List[Dict[str, np.ndarray]]): list of dictionary with det - detected boxes in format [x1, y1, x2, y2, score, label]
+    """
+    nms_kwargs = {"agnostic": agnosting_nms, "max_det": max_detections, "max_nms": 100 }
+    preds = ops.non_max_suppression(torch.from_numpy(pred_boxes), min_conf_threshold, nms_iou_threshold, nc=80, **nms_kwargs)
+
+    boxes = []
+    results = []
+    results.append({"boxes": boxes})
+#    return results
+
+    for i, pred in enumerate(preds):
+        shape = orig_img[i].shape if isinstance(orig_img, list) else orig_img.shape
+        if not len(pred):
+            continue
+        pred[:, :4] = ops.scale_boxes(input_hw, pred[:, :4], shape).round()
+        #print("pred: ", pred)
+        xyxy = [ pred[0][1], pred[0][1], pred[0][0]+pred[0][2], pred[0][1]+pred[0][3] ]
+        box = Box(xyxy, pred[0][4], pred[0][5])
+        #print("------>Box: ", box.xyxy, " ", box.cls, " " , box.conf)
+        boxes.append(box)
+    #print("Num of boxes: ", len(boxes))
+    return results
 
 def do_bit_on_roi(cls_model, roi, cls_imgsz, output_layer):
     resized_roi = cv2.resize(roi, (64,64), interpolation=cv2.INTER_LINEAR) 
@@ -448,7 +520,89 @@ def do_bit_on_roi(cls_model, roi, cls_imgsz, output_layer):
     #print(result_infer)
     #print("Done bit infer!")
     #result_index = np.argmax(result_infer)
+
+def do_yolo_on_roi2(det_model, roi, det_imgsz, output_layer):
+    resized_roi = cv2.resize(roi, det_imgsz, interpolation=cv2.INTER_LINEAR)
+    resized_roi = resized_roi.transpose((2, 0, 1))  # Change data layout from HWC to CHW
+    resized_roi = resized_roi.reshape((1,3, det_imgsz[0], det_imgsz[1]))
+
+    res = det_model(resized_roi)[output_layer]
+    print(roi.shape, " " , resized_roi.shape[:2])
+    quit()
+    detections = postprocess(res, resized_roi.shape[:2], roi)
+    return detections
+
+
+def do_yolo_on_frame(det_model, frame, det_imgsz, output_layer):    
+    # Input N C H W
+    #print(det_model.input(0))
+    # Resize with W H
+    resized_roi = cv2.resize(frame, (det_imgsz[0], det_imgsz[1]), interpolation=cv2.INTER_LINEAR)
+    resized_roi = cv2.dnn.blobFromImage(resized_roi, 1/255, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
+    #resized_roi = tf.reshape(resized_roi, [1,3, det_imgsz[0], det_imgsz[1]])
+    #print(resized_roi.shape)
+    #input_tensor = np.expand_dims(resized_roi, 0)
+    #print(input_tensor) 
+
+    #resized_roi = tf.reshape(resized_roi, [1,3,det_imgsz[0], det_imgsz[1]])
+    #print(output_layer)
+    #print(det_imgsz)
+    #print(resized_roi.shape)
+    res = det_model(resized_roi)[output_layer]
+    res = cv2.transpose(res[0])
+    # output layer is 1,84,5400 so needs NMS.
+    #print(output_layer)    
+    #print(res)
     
+    #eta = 0.5
+    nmsThreshold = 0.6
+    confThreshold = 0.65
+
+    boxes = []
+    scores = []
+    classIds = []
+    for x in res:
+        confs = x[4:]
+        (min_conf, max_conf, min_loc, (x1, classIdIdx)) = cv2.minMaxLoc(confs)
+        if max_conf >= .65:
+            box = [x[0] - (0.5 * x[2]), x[1] - (0.5 * x[3]), x[2], x[3]]
+            boxes.append(box)
+            scores.append(max_conf)
+            classIds.append(classIdIdx)
+            #print(box, " " , classIdIdx)
+            #quit()
+
+    # TODO: ScaleX and scaleY if H,W are not equal
+    #print(frame.shape, " " , det_imgsz)
+    scaleX = frame.shape[1] / det_imgsz[1] 
+    scaleY = frame.shape[0] / det_imgsz[0]
+
+    #print(frame.shape[1], " ", det_imgsz[0], " " , frame.shape[0], " ", det_imgsz[1])
+    #print(scaleX, " " , scaleY)
+
+    #print(len(boxes))
+    boxIds = cv2.dnn.NMSBoxes(boxes, scores, confThreshold, nmsThreshold) #, eta) 
+    #print("Post NMS")
+    #print(len(boxIds))
+
+    detections = []
+    results = []
+    for boxId in boxIds:
+        xyxy = [ round(boxes[boxId][0]*scaleX), round(boxes[boxId][1]*scaleY), round((boxes[boxId][2]+boxes[boxId][0])*scaleX), round((boxes[boxId][3]+boxes[boxId][1])*scaleY) ]
+        box = Box(xyxy, scores[boxId], classIds[boxId])
+        #print("------>Box: ", box.xyxy, " ", box.cls, " " , box.conf)
+        #detections.append(box)
+        results.append({"boxes": [box]})
+
+    #print(roi.shape, " " , det_imgsz)
+    #detections = postprocess(res, det_imgsz, roi)
+    #detections = [{"boxes": []}]
+    #print(res)
+    #print("---")
+    #print(torch.from_numpy(res[0]))
+    #print("***", detections)
+    #results.append({"boxes": detections})
+    return results
 
 def clear_shopping_cart():
     global genAiItems, rowGen, colGen,x,y
@@ -541,15 +695,24 @@ model_names = model.names
 #cls_model = YOLO(cls_model_name)
 
 # Set OpenVINO model to default to 384x640 as well
+from openvino.runtime import Core
+ie = Core()
 if use_openvino:
-    path = model.export(format='openvino', imgsz=det_imgsz, half=True)
-    model = YOLO(path)
+    # ultralytics CPU usage is over 1000% for this YOLO model!! Hihgly inefficient
+    #path = model.export(format='openvino', imgsz=det_imgsz, half=True)
+    #model = YOLO(path)
     #path = cls_model.export(format='openvino', imgsz=cls_imgsz)
     #cls_model = YOLO(path)
 
+    ov_model = ie.read_model("/savedir/yolov8n-int8.xml")
+    ov_config = {}
+    ov_model.reshape({0: [1,3,det_imgsz[0], det_imgsz[1]]})
+    # Use if GPU or AUTO AND GPU AVAILABLE
+    #ov_config = {"GPU_DISABLE_WINOGRAD_CONVOLUTION": "YES"}
+    model = ie.compile_model(ov_model, "NPU", ov_config)
+    output_layer = model.output(0)
+
 # use Bit Model instead
-from openvino.runtime import Core
-ie = Core()
 #cls_model = ie.read_model(model="BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml")
 #cls_model.reshape({0:[1,64,64,3]})
 
@@ -615,7 +778,6 @@ vidPicture = None
 #color_frame3 = frameset3.get_color_frame()
 
 success, frame = cap.read()
-print
 
 #while color_frame and depth_frame:
 while cap.isOpened() and success:
@@ -644,14 +806,19 @@ while cap.isOpened() and success:
         #updateGenAIResult(tabGenAIView, trackid, res, True)
 
 
-    results = model.track(frame, tracker=tracker, imgsz=det_imgsz, persist=True, verbose=False)
+    #results = model.track(frame, tracker=tracker, imgsz=det_imgsz, persist=True, verbose=False)
     #result2 = model(frame2, imgsz=det_imgsz, verbose=False)
     #result3 = model(frame3, imgsz=det_imgsz, verbose=False)
+    results = do_yolo_on_frame(model, frame.copy(), det_imgsz, output_layer)    
     send_lvlm_processing = True
 
+    #print("process results......", videoFrameWidth, " ", videoFrameHeight)
+    if show_gui:
+        annotated_frame = frame.copy()
     for result in results:
-        boxes = result.boxes.cpu()
-        track_ids = result.boxes.id.int().cpu().tolist() if not result.boxes.id is None else []
+        #boxes = result.boxes.cpu() # ultralytics
+        boxes = result["boxes"]
+        #track_ids = result.boxes.id.int().cpu().tolist() if not result.boxes.id is None else []
         result_label = ""
         result_label_cls = ""
 
@@ -664,8 +831,10 @@ while cap.isOpened() and success:
         if not send_lvlm_processing:
             continue
 
-        if show_gui:
-            annotated_frame = result.plot()
+        #if show_gui:
+        #    do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label)
+            #annotated_frame = result.plot()
+
 
         #print("No hand in pic-->", result_label, "person" in result_label)
 
@@ -677,56 +846,68 @@ while cap.isOpened() and success:
         #    updateGenAIResult(tabGenAIView, trackid, res, True)
 
 
-        for box, track_id in zip(boxes, track_ids):
+        #for box, track_id in zip(boxes, track_ids):        
+        for box in boxes:
             c, conf, id = int(box.cls), float(box.conf), None if box.id is None else int(box.id.item())
 
-            roi = save_one_box(box.xyxy, result.orig_img.copy(),BGR=True, save=False)
+            #origFrame = result.orig_img.copy()
+            origFrame = frame.copy()
+
+            roi = save_one_box(torch.tensor(box.xyxy), origFrame,BGR=True, save=False)
+            result_label = model_names[c]
+            #print("Detected: ", result_label)
+            cls_label = do_weaviate_resnet50_on_roi(roi)
+            if show_gui:
+                do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label + ": " + cls_label)
+            result_label = cls_label
+
+            #print("Feature classification: ", result_label)
            
             #result.save_crop("/savedir", str(track_id) + ".jpg")
 
-            tracked_object = tracked_objects.get(track_id)
-            tracked_object_time = tracked_objects_time.get(track_id)
-            tracked_object_state = tracked_objects_state.get(track_id)
+            #tracked_object = tracked_objects.get(track_id)
+            #tracked_object_time = tracked_objects_time.get(track_id)
+            #tracked_object_state = tracked_objects_state.get(track_id)
 
             #if not skip_frame_reclassify or not tracked_object:
-            if not tracked_object:
-                result_label = model_names[c] 
-            else:
-                result_label = tracked_object
+            #if not tracked_object:
+            #    result_label = model_names[c] 
+            #else:
+            #    result_label = tracked_object
 
-            if not tracked_object:
-                # for cls
-                # comment out below and 
-                #do_weaviate_resnet50_on_roi(roi, cls_imgsz)
-                # result_label = do_classification_on_roi(cls_model, roi, cls_imgsz)
-                #result_label = do_bit_on_roi(compiled_model, roi, cls_imgsz,output_layer)
-                result_label = do_weaviate_resnet50_on_roi(roi)
-                #result_label2 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
-                #result_label3 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
+            #if not tracked_object:
+            #    # for cls
+            #    # comment out below and 
+            #    #do_weaviate_resnet50_on_roi(roi, cls_imgsz)
+            #    # result_label = do_classification_on_roi(cls_model, roi, cls_imgsz)
+            #    #result_label = do_bit_on_roi(compiled_model, roi, cls_imgsz,output_layer)
+            #    result_label = do_weaviate_resnet50_on_roi(roi)
+            #    #result_label2 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
+            #    #result_label3 = do_bit_on_roi(compiled_model, roi, cls_imgsz, output_layer)
 
-                objTime = time.time()
-                tracked_objects.put(track_id, result_label)
-                tracked_objects_time.put(track_id, objTime)
-                tracked_objects_state.put(track_id, 0)
+            #    objTime = time.time()
+            #    tracked_objects.put(track_id, result_label)
+            #    tracked_objects_time.put(track_id, objTime)
+            #    tracked_objects_state.put(track_id, 0)
 
-                #print("Caching: ", tracked_objects.get(track_id))
+            #    #print("Caching: ", tracked_objects.get(track_id))
 
-                #print("New item not tracked needs LVLM trackid: ", track_id, ", item: ", result_label, " at ", objTime)
-            elif not tracked_object is None:
-                # this is a debounce routine
-                # items is tracked but has it been tracking long enough for hand to be out of picture
-                if ((time.time() - tracked_object_time)*1000) > 100 and tracked_object_state == 0:
-                    item_label = result_label + ": #" + str(track_id)
-                    ret, jpgImg = cv2.imencode('.jpg', roi)
-                    startingRowIdxShoppingCart = addShoppingCartItem(cartFrame, startingRowIdxShoppingCart,
-                                                                     item_label, roi)
-                    #publish(client, jpgImg.tobytes(), str(track_id), "describe the item in the image")
-                    #addGenAIResult(tabGenAIView, roi, track_id, "describe the item in the image", jpgImg)
-                    tracked_objects_state.put(track_id, 1)
+            #    #print("New item not tracked needs LVLM trackid: ", track_id, ", item: ", result_label, " at ", objTime)
+            #elif not tracked_object is None:
+            #    # this is a debounce routine
+            #    # items is tracked but has it been tracking long enough for hand to be out of picture
+            #    if ((time.time() - tracked_object_time)*1000) > 100 and tracked_object_state == 0:
+            #        item_label = result_label + ": #" + str(track_id)
+            #        ret, jpgImg = cv2.imencode('.jpg', roi)
+            #        startingRowIdxShoppingCart = addShoppingCartItem(cartFrame, startingRowIdxShoppingCart,
+            #                                                         item_label, roi)
+            #        #publish(client, jpgImg.tobytes(), str(track_id), "describe the item in the image")
+            #        #addGenAIResult(tabGenAIView, roi, track_id, "describe the item in the image", jpgImg)
+            #        tracked_objects_state.put(track_id, 1)
 
-            # only need if using cls
-            #if show_gui:
-            #    do_update_annotated_frame(annotated_frame, box.xywh, result_label)A
+            ## only need if using cls
+            ##if show_gui:
+            ##    do_update_annotated_frame(annotated_frame, box.xywh, result_label)A
 
     frame_count = frame_count + 1
 
@@ -743,6 +924,7 @@ while cap.isOpened() and success:
             annotated_frame = frame
 
         #cv2.imshow("YOLOv8 " + tracker + " Tracking" + " with OpenVINO" if use_openvino else "", annotated_frame)
+        #print("Frame info: " , annotated_frame.shape, " ", videoFrameWidth, " ", videoFrameHeight)
 
         matImg = cv2.resize(annotated_frame, (videoFrameWidth,videoFrameHeight), interpolation=cv2.INTER_LINEAR)
         b,g,r = cv2.split(matImg)
