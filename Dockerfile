@@ -48,3 +48,5 @@ RUN mkdir npu-drivers; cd npu-drivers; wget https://github.com/intel/linux-npu-d
 
 COPY run-usb-camera.sh .
 COPY run-rtsp-camera.sh .
+COPY multiproc.py .
+COPY run-2rtsp-camera.sh .

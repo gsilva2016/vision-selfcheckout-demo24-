@@ -26,6 +26,9 @@ from typing import Tuple, Dict
 import weaviate
 import base64
 
+# multi-proc for multi-cameras
+import subprocess
+
 
 import time
 from paho.mqtt import client as mqtt_client
@@ -42,7 +45,8 @@ gen_ai_ui = None
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--tracker", nargs="?", default="botsort.yaml", help="botsort.yaml (Default) or bytetrack.yaml")
-parser.add_argument("--source", nargs="?", default="sample.mp4")
+#parser.add_argument("--source", nargs="?", default="sample.mp4")
+parser.add_argument("--source", "-s", action='append', help='USB or RTSP or FILE sources', required=True)
 parser.add_argument("--model", nargs="?", default="yolov8n.pt")
 parser.add_argument("--cls_model", nargs="?", default="yolov8n-cls.pt")
 parser.add_argument("--enable_cls_preprocessing", default=False, action="store_true")
@@ -721,7 +725,13 @@ if use_openvino:
 
 frame_count = 0
 skip_frame_reclassify = False
-cap = cv2.VideoCapture(source)
+caps = []
+
+for s in source:
+    cap = cv2.VideoCapture(s)
+    caps.append(cap)
+
+
 #if "/dev/video" in source:
 #    print("Requesting 1280x720 camera resolution")
 #    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
@@ -762,7 +772,7 @@ cap = cv2.VideoCapture(source)
 #    pipe2.wait_for_frames()
 #    pipe3.wait_for_frames()
 
-print("capturing video from: ", source)
+print("capturing video(s) from: ", source)
 
 print("Running ", model_name, " with OpenVINO" if use_openvino else "")
 #sfilter = ["banana", "apple", "orange", "broccoli", "carrot", "bottle"]
@@ -777,15 +787,23 @@ vidPicture = None
 #color_frame2 = frameset2.get_color_frame()
 #color_frame3 = frameset3.get_color_frame()
 
-success, frame = cap.read()
+numOfCaps = len(caps)
+capIdx = 0
+#for cap in caps:
+while True:
+    cap = caps[capIdx]
+    success, frame = cap.read()
+    if not cap.isOpened() or not success:
+        print('video failed...')
+        break
 
-#while color_frame and depth_frame:
-while cap.isOpened() and success:
+
     annotated_frame = None
     #window.update_idletasks()
     #window.update()
 
-    start_time = time.time()
+    if capIdx == 0:
+        start_time = time.time()
 
     #if not success:
     #    print("Could not read any frames. Quitting.")
@@ -909,8 +927,13 @@ while cap.isOpened() and success:
             ##if show_gui:
             ##    do_update_annotated_frame(annotated_frame, box.xywh, result_label)A
 
-    frame_count = frame_count + 1
+    if capIdx == numOfCaps -1:
+        capIdx = 0        
+        frame_count = frame_count + 1
+    else:
+        capIdx = capIdx + 1
 
+#    print(capIdx, " " , numOfCaps)
     # Skip reclassification based on tracked objects and interval specified
     skip_frame_reclassify = frame_count % reclassify_interval != 0
 
@@ -919,7 +942,7 @@ while cap.isOpened() and success:
         print("Seconds taken for pipeline: ", elapsed_time)
 
     # Display the annotated frame
-    if show_gui:
+    if show_gui and capIdx == 0:
         if annotated_frame is None:
             annotated_frame = frame
 
@@ -947,7 +970,8 @@ while cap.isOpened() and success:
     #if cv2.waitKey(1) & 0xFF == ord("q"):
     #    break
     try:
-        success, frame = cap.read()
+        pass
+        #success, frame = cap.read()
 
         #frameset = pipe.wait_for_frames()
         #frameset2 = pipe2.wait_for_frames()
