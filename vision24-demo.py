@@ -728,7 +728,7 @@ skip_frame_reclassify = False
 caps = []
 
 for s in source:
-    cap = cv2.VideoCapture(s)
+    cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
     caps.append(cap)
 
 
