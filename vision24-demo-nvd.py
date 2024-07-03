@@ -728,14 +728,14 @@ skip_frame_reclassify = False
 caps = []
 
 for s in source:
-    cap = cv2.VideoCapture(s) #, cv2.CAP_GSTREAMER)
+    if "dev/video" in s:
+        cap = cv2.VideoCapture(s)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    else:
+        cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
     caps.append(cap)
 
-
-#if "/dev/video" in source:
-#    print("Requesting 1280x720 camera resolution")
-#    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-#    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 #ctx = rs.context()
 #devices = ctx.query_devices()
