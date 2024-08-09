@@ -606,6 +606,10 @@ sfilter = ["person", "bottle"]
 vidPicture = None
 numOfCaps = len(caps)
 capIdx = 0
+avg_elapsed_time = 0
+max_elapsed_time = 0
+min_elapsed_time = 0
+
 while True:
     cap = caps[capIdx]
     success, frame = cap.read()
@@ -687,24 +691,32 @@ while True:
             cls_label = do_efficientnet_on_roi(cls_model, roi, cls_imgsz, cls_output_layer)
             if show_gui:
                 do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label + ": " + cls_label)
-
-            print("Detected: ", result_label, " Classification: ", cls_label)
-            result_label = cls_label
+            else:
+                print("Detected: ", result_label, " Classification: ", cls_label)
+            #result_label = cls_label
 
 
     if capIdx == numOfCaps -1:
         capIdx = 0        
         frame_count = frame_count + 1
+        # Skip reclassification based on tracked objects and interval specified
+        skip_frame_reclassify = frame_count % reclassify_interval != 0
+
+        elapsed_time = time.time() - start_time
+        if elapsed_time > max_elapsed_time:
+            max_elapsed_time = elapsed_time
+        if elapsed_time < min_elapsed_time or min_elapsed_time == 0:
+            min_elapsed_time = elapsed_time
+        avg_elapsed_time = elapsed_time + avg_elapsed_time
+
+        print_at_frame = 5
+        if frame_count % print_at_frame == 0:
+            print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
+            print("Max latency: ", max_elapsed_time, "ms")
+            print("Min latency: ", min_elapsed_time, " ms")
+                                        
     else:
         capIdx = capIdx + 1
-
-    # Skip reclassification based on tracked objects and interval specified
-    skip_frame_reclassify = frame_count % reclassify_interval != 0
-
-    elapsed_time = time.time() - start_time
-    frame_driver = 5
-    if frame_count % frame_driver == 0:
-        print("Seconds taken for last ", frame_driver, " frames in pipeline: ", elapsed_time)
 
     # Display the annotated frame
     if show_gui and capIdx == 0:
