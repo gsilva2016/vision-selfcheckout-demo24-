@@ -13,24 +13,11 @@ import argparse
 import numpy as np
 from queue import Queue
 
-try:
-    pyrs = 1
-    import pyrealsense2 as rs
-except:
-    print("pyrealsense: no")
-    pyrs = 0
-
-
-# ov direct from yolov8-object-det notebook
-#from typing import Tuple, Dict
-
-
 # multi-proc for multi-cameras
 import subprocess
-
-
 import time
 from paho.mqtt import client as mqtt_client
+
 broker = 'broker.hivemq.com'
 broker = '198.175.88.142'
 broker = ''
@@ -44,7 +31,7 @@ gen_ai_ui = None
 
 parser = argparse.ArgumentParser()
 #parser.add_argument("--source", nargs="?", default="sample.mp4")
-parser.add_argument("--source", "-s", action='append', help='USB or RTSP or FILE sources', required=True)
+parser.add_argument("--source", "-s", action='append', help='USB or RTSP or FILE or RealSense sources', required=True)
 parser.add_argument("--enable_cls_preprocessing", default=False, action="store_true")
 parser.add_argument("--reclassify_interval", nargs="?", type=int, default=1)
 parser.add_argument("--max_tracked_objects", nargs="?", type=int, default=20)
@@ -67,6 +54,14 @@ det_imgsz = args.det_imgsz
 cls_imgsz = args.cls_imgsz
 en_int8 = args.enable_int8
 device_name = args.device_name
+
+try:
+    pyrs = 1
+    import pyrealsense2 as rs
+    print("pyrealsense: yes")
+except:
+    print("pyrealsense: no")
+    pyrs = 0
 
 if device_name is None or device_name == "":
     device_name = "GPU"
@@ -498,8 +493,10 @@ cartFrameWidth = 200
 cartFrameHeight = windowHeight - 100
 videoFrameWidth = windowWidth - cartFrameWidth
 videoFrameHeight = cartFrameHeight
+window = None
 
 if show_gui:
+    print("window_mode: yes")
     window = tkinter.Tk()
     window.title("Vision Self-Checkout Demo")
     window.bind('<Escape>', close_window)
@@ -530,15 +527,33 @@ if show_gui:
 
     shoppingCartLabel = tkinter.Label(cartFrame, text="               Shopping Cart")
     shoppingCartLabel.grid(row=0, column=0, sticky=tkinter.NW, columnspan=2, pady=10, padx=0)
+else:
+    print("console_mode: yes")
 
 # Video playback / inference
 caps = []
+pipe = None
 
 for s in source:
+    cap = None
+
     if "/dev/video" in s:
         cap = cv2.VideoCapture(s)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    elif not ".mp4" in s and not "rtsp:" in s:
+        if pyrs == 0:
+            print("ERROR: Realsense library not installed to use with specified Realsense --source option.")
+            quit()
+        pipe = rs.pipeline()
+        cfg = rs.config()
+        cfg.enable_device(str(s))
+        cfg.enable_stream(rs.stream.color, 1280,720, rs.format.bgr8, 15)
+        cfg.enable_stream(rs.stream.depth, 1280,720, rs.format.z16, 15)
+        profile = pipe.start(cfg)
+        # Skip 5 first frames to give auto-exposure time to adjust
+        for t in range(5):
+            pipe.wait_for_frames()
     else:
         try:
             print("Loading video stream.")
@@ -548,7 +563,8 @@ for s in source:
             print("Retrying loading video stream.")
             cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
             print("Video stream loaded.")
-    caps.append(cap)
+    if cap:
+        caps.append(cap)
 
 ## Source model defaults to 384x640
 det_model_names = ""
@@ -604,18 +620,25 @@ print("Running ", model_name, " OpenVINO")
 #sfilter = ["bottle"]
 sfilter = ["person", "bottle"]
 vidPicture = None
-numOfCaps = len(caps)
+numOfCaps = len(source)
 capIdx = 0
 avg_elapsed_time = 0
 max_elapsed_time = 0
 min_elapsed_time = 0
 
 while True:
-    cap = caps[capIdx]
-    success, frame = cap.read()
-    if not cap.isOpened() or not success:
-        print('video feed done...')
-        break
+    if pyrs == 0:
+        cap = caps[capIdx]
+        success, frame = cap.read()
+        if not cap.isOpened() or not success:
+            print('video feed done...')
+            break
+    else:
+        frameset = pipe.wait_for_frames()
+        frame = frameset.get_color_frame()
+        if not frame is None:
+            success = True
+            frame = np.asanyarray(frame.get_data())
 
 
     annotated_frame = None
@@ -638,6 +661,7 @@ while True:
     #print("process results......", videoFrameWidth, " ", videoFrameHeight)
     if show_gui:
         annotated_frame = frame.copy()
+
     for result in results:
         boxes = result["boxes"]
         result_label = ""

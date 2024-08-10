@@ -26,7 +26,8 @@ RUN apt -y update && apt install -y wget && \
 # app dependencies
 ARG INCLUDE_REALSENSE
 
-RUN if [ "$INCLUDE_REALSENSE" = "Y" ]; then echo "pyrealsense2: Yes" && sleep 2 && pip install pyrealsense2; else echo "pyrealsense2: No" && sleep 2; fi
+# Enumerate cameras via: rs list 
+RUN if [ "$INCLUDE_REALSENSE" = "Y" ]; then echo "pyrealsense2: Yes" && sleep 2 && pip install pyrealsense2 realsense-cli; else echo "pyrealsense2: No" && sleep 2; fi
 RUN pip install openvino==2024.3.0
 RUN pip install "paho-mqtt<2.0.0"
 #RUN pip install tensorflow
@@ -94,3 +95,4 @@ ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="hw_decoders_any;vaapi"
 # Example runs:
 ## python3 openvino-demo.py --source coke.mp4 --enable_int8 --device "CPU" --cls_model efficientnet-b0
 ## python3 openvino-demo.py --source coke.mp4 --enable_int8 --cls_model resnet-50-tf_i8.xml
+## python3 openvino-demo.py --source 130322273236 --enable_int8 --device "NPU" --cls_model resnet-50-tf_i8.xml
