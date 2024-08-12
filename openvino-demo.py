@@ -39,12 +39,14 @@ parser.add_argument("--show", default=False, action="store_true")
 parser.add_argument("--cls_model")
 parser.add_argument("--enable_int8", default=False, action="store_true")
 parser.add_argument("--device_name")
+parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=15)
 # 384, 640
 parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,640])
 parser.add_argument("--cls_imgsz", type=int, nargs='+', default=[224,224])
 
 args = parser.parse_args()
 source = args.source
+print_metrics_interval = args.print_metrics_interval
 cls_model_name = args.cls_model
 enable_cls_preprocessing = args.enable_cls_preprocessing
 show_gui = args.show
@@ -415,9 +417,14 @@ def do_efficientnet_on_roi(cls_model, roi, cls_imgsz, output_layer):
     #print(roi.shape, " ", roi.size)
 
     # https://docs.openvino.ai/2022.3/omz_models_model_resnet_50_tf.html
-    resized_roi = roi
-    mean = [0,0,0]
-    resized_roi = cv2.dnn.blobFromImage(resized_roi, 1, (cls_imgsz[1],cls_imgsz[0]),mean,1, crop=False)
+    if "efficientnet" in cls_model_name:
+        resized_roi = cv2.resize(roi, cls_imgsz, interpolation=cv2.INTER_LINEAR)
+        if not resized_roi.data.contiguous:
+            print("WARNING: imgage is not continous! Result may not be correct for inference.")
+        resized_roi = np.expand_dims(resized_roi, 0)
+    elif "resnet" in cls_model_name:
+        mean = [0,0,0]
+        resized_roi = cv2.dnn.blobFromImage(roi, 1, (cls_imgsz[1],cls_imgsz[0]),mean,1, crop=False)
     return cls_model_names[np.argmax(cls_model([resized_roi])[output_layer])]
 
 
@@ -541,6 +548,7 @@ for s in source:
         cap = cv2.VideoCapture(s)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        pyrs = 0
     elif not ".mp4" in s and not "rtsp:" in s:
         if pyrs == 0:
             print("ERROR: Realsense library not installed to use with specified Realsense --source option.")
@@ -555,6 +563,7 @@ for s in source:
         for t in range(5):
             pipe.wait_for_frames()
     else:
+        pyrs = 0
         try:
             print("Loading video stream.")
             cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
@@ -733,7 +742,7 @@ while True:
             min_elapsed_time = elapsed_time
         avg_elapsed_time = elapsed_time + avg_elapsed_time
 
-        print_at_frame = 5
+        print_at_frame = print_metrics_interval
         if frame_count % print_at_frame == 0:
             print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
             print("Max latency: ", max_elapsed_time, "ms")
