@@ -24,6 +24,18 @@ Run Container:
 ./run-openvino.sh
 ```
 
+Run GUI Application:
+
+```
+python3 openvino-demo.py --source <MY_VIDEO>.mp4 --enable_int8 --device "GPU" --cls_model efficientnet-b0 --show
+```
+
+Run Console Application:
+
+```
+python3 openvino-demo.py --source <MY_VIDEO>.mp4 --enable_int8 --device "GPU" --cls_model resnet-50
+```
+
 ### OpenVINO Inference of RealSense Camera media
 
 Build Container with CPU, GPU, NPU and RealSense support: 
@@ -36,6 +48,17 @@ Run Container:
 
 ```
 ./run-openvino.sh
+```
+
+Run GUI Application:
+
+```
+rs list
+```
+
+```
+serial_id=130322273236
+python3 openvino-demo.py --source $serial_id --enable_int8 --device "GPU" --cls_model resnet-50 --print_metrics_interval 15 --show
 ```
 
 ## Python PyTorch OpenVINO backend Demos
