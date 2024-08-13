@@ -11,3 +11,5 @@ then
 fi
 
 docker build -t yolo-demo-openvino:1.0 --build-arg "INCLUDE_NPU=$INCLUDE_NPU" --build-arg "INCLUDE_REALSENSE=$INCLUDE_REALSENSE" -f Dockerfile.openvino .
+
+docker build -t yolo-demo-torchopenvino:1.0 --build-arg "INCLUDE_NPU=$INCLUDE_NPU" --build-arg "INCLUDE_REALSENSE=$INCLUDE_REALSENSE" -f Dockerfile.torchopenvino .

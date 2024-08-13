@@ -5,6 +5,9 @@ det_imgsz = (384,640)
 model = YOLO(model_name)
 model_names = model.names
 
+path = model.export(imgsz=det_imgsz, half=True)
+print("Torch ", model_name, " created: ", path)
+
 path = model.export(format='openvino', imgsz=det_imgsz, half=True)
 print("OpenVINO ", model_name, " created: ", path)
 
