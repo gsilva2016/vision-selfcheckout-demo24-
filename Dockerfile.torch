@@ -11,32 +11,6 @@ RUN pip install ultralytics
 COPY gen_openvino_yolov8.py .
 RUN python3 gen_openvino_yolov8.py 
 
-FROM ubuntu:22.04 as model_gen_efficientnet
-user root
-ENV DEBIAN_FRONTEND=noninteractive
-ARG BUILD_DEPENDENCIES="python3 python3-pip"
-RUN apt -y update && \
-    apt install -y ${BUILD_DEPENDENCIES} && \
-    rm -rf /var/lib/apt/lists/* && rm -rf /tmp/*
-RUN apt -y update && apt install -y wget && \
-    rm -rf /var/lib/apt/lists/* && rm -rf /tmp/*
-RUN pip install torch torchvision
-COPY gen_efficientnet.py .
-RUN python3 gen_efficientnet.py
-
-FROM ubuntu:22.04 as model_gen_resnet50
-user root
-ENV DEBIAN_FRONTEND=noninteractive
-ARG BUILD_DEPENDENCIES="python3 python3-pip"
-RUN apt -y update && \
-    apt install -y ${BUILD_DEPENDENCIES} && \
-    rm -rf /var/lib/apt/lists/* && rm -rf /tmp/*
-RUN apt -y update && apt install -y wget && \
-    rm -rf /var/lib/apt/lists/* && rm -rf /tmp/*
-RUN pip install torch torchvision
-COPY gen_resnet50.py .
-RUN python3 gen_resnet50.py
-
 
 FROM ubuntu:22.04 as release
 WORKDIR /yolo_ov_demo
@@ -54,8 +28,9 @@ ARG INCLUDE_REALSENSE
 
 # Enumerate cameras via: rs list 
 RUN if [ "$INCLUDE_REALSENSE" = "Y" ]; then echo "pyrealsense2: Yes" && sleep 2 && pip install pyrealsense2 realsense-cli; else echo "pyrealsense2: No" && sleep 2; fi
-RUN pip install openvino==2024.3.0
+#RUN pip install openvino==2024.3.0
 RUN pip install "paho-mqtt<2.0.0"
+RUN pip install termcolor timm ultralytics
 #RUN pip install tensorflow
 
 # Intel gfx/media client drivers
@@ -87,34 +62,45 @@ RUN wget https://github.com/opencv/opencv/archive/refs/tags/4.9.0.zip && unzip 4
 # Install NPU drivers
 # app dependencies
 ARG INCLUDE_NPU
-
 RUN if [ "$INCLUDE_NPU" = "Y" ]; then echo "NPU: Yes" && sleep 2 && mkdir npu-drivers && cd npu-drivers && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-driver-compiler-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-fw-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-level-zero-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/oneapi-src/level-zero/releases/download/v1.10.0/level-zero_1.10.0+u22.04_amd64.deb && dpkg -i *.deb; else echo "NPU: No" && sleep 2; fi
 
-#RUN cd /opt/intel/openvino/samples/cpp; ./build_samples.sh
 
-RUN pip install pillow torch torchvision
+ARG USE_IPEX
+RUN ls -l  /usr/share/keyrings/; sleep 5
+RUN if [ "$USE_IPEX" = "N" ]; then echo "USE_IPEX: No" && sleep 2 && pip install pillow torch torchvision; else echo "USE_IPEX: Yes" && sleep 2 ; fi
+
+RUN if [ "$USE_IPEX" = "Y" ]; then wget -qO - https://repositories.intel.com/gpu/intel-graphics.key | gpg --dearmor --output /usr/share/keyrings/intel-graphics.gpg; \
+echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/gpu/ubuntu jammy client" | \
+tee /etc/apt/sources.list.d/intel-gpu-jammy.list; \
+apt update; apt install level-zero -y; fi
+
+RUN if [ "$USE_IPEX" = "Y" ]; then wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/oneapi-archive-keyring.gpg > /dev/null && echo "deb [signed-by=/usr/share/keyrings/oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main" | tee /etc/apt/sources.list.d/oneAPI.list && apt update && apt install -y intel-oneapi-common-vars=2024.0.0-49406 intel-oneapi-common-oneapi-vars=2024.0.0-49406 intel-oneapi-diagnostics-utility=2024.0.0-49093 intel-oneapi-compiler-dpcpp-cpp=2024.0.2-49895 intel-oneapi-dpcpp-ct=2024.0.0-49381 intel-oneapi-mkl=2024.0.0-49656 intel-oneapi-mkl-devel=2024.0.0-49656 intel-oneapi-mpi=2021.11.0-49493 intel-oneapi-mpi-devel=2021.11.0-49493 intel-oneapi-dal=2024.0.1-25 intel-oneapi-dal-devel=2024.0.1-25 intel-oneapi-ippcp=2021.9.1-5 intel-oneapi-ippcp-devel=2021.9.1-5 intel-oneapi-ipp=2021.10.1-13 intel-oneapi-ipp-devel=2021.10.1-13 intel-oneapi-tlt=2024.0.0-352 intel-oneapi-ccl=2021.11.2-5 intel-oneapi-ccl-devel=2021.11.2-5 intel-oneapi-dnnl-devel=2024.0.0-49521 intel-oneapi-dnnl=2024.0.0-49521 intel-oneapi-tcm-1.0=1.0.0-435 && sleep 5 && echo "Install IPEX-LLM" && pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/; fi
+
 # Remove OpenCV from ultralytics install
 #RUN pip uninstall opencv-python -y
+
 
 COPY run-usb-camera.sh .
 COPY run-rtsp-camera.sh .
 COPY multiproc.py .
 COPY run-2rtsp-camera.sh .
-COPY --from=model_gen_yolo yolov8n.torchscript .
+#COPY --from=model_gen_yolo yolov8n.torchscript .
 COPY --from=model_gen_yolo yolo-names.txt .
-COPY --from=model_gen_efficientnet efficientnet-b0.pt .
-COPY --from=model_gen_resnet50 resnet50.pt .
-COPY --from=model_gen_resnet50 resnet50-int8.pt .
+#COPY --from=model_gen_efficientnet efficientnet-b0.pt .
+#COPY --from=model_gen_resnet50 resnet50.pt .
+#COPY --from=model_gen_resnet50 resnet50-int8.pt .
 COPY torch-demo.py .
 COPY efficientnet.labels .
-COPY resnet.labels .
+COPY imgnet.labels .
 
 #ENV OPENCV_LOG_LEVEL=DEBUG
 #ENV OPENCV_VIDEOIO_DEBUG=1
 ENV OPENCV_FFMPEG_CAPTURE_OPTIONS="hw_decoders_any;vaapi"
 
 # Example runs:
+## python3 torch-demo.py --source coke.mp4 --disable_classification --device_name "xpu"
 ## python3 torch-demo.py --source coke.mp4 --use_openvino_backend --cls_model efficientnet
 ## python3 torch-demo.py --source coke.mp4 --device "GPU" --cls_model efficientnet
+## python3 torch-demo.py --source coke.mp4 --device "GPU" --disable_classification
 ## python3 torch-demo.py --source coke.mp4 --cls_model resnet --enable_int8
 ## python3 torch-demo.py --source 130322273236 --enable_int8 --device "GPU" --cls_model resnet --print_metrics_interval 15

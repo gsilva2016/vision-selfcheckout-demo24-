@@ -20,7 +20,9 @@ from paho.mqtt import client as mqtt_client
 
 # inference
 import torch
-import openvino.torch
+import timm
+
+os.environ['YOLO_VERBOSE'] = 'False'
 
 broker = 'broker.hivemq.com'
 broker = '198.175.88.142'
@@ -37,22 +39,24 @@ parser = argparse.ArgumentParser()
 #parser.add_argument("--source", nargs="?", default="sample.mp4")
 parser.add_argument("--source", "-s", action='append', help='USB or RTSP or FILE or RealSense sources', required=True)
 parser.add_argument("--enable_cls_preprocessing", default=False, action="store_true")
-parser.add_argument("--use_openvino_backend", default=False, action="store_true")
+parser.add_argument("--show_inference", default=False, action="store_true")
+parser.add_argument("--disable_classification", default=False, action="store_true")
 parser.add_argument("--reclassify_interval", nargs="?", type=int, default=1)
 parser.add_argument("--max_tracked_objects", nargs="?", type=int, default=20)
 parser.add_argument("--show", default=False, action="store_true")
 parser.add_argument("--cls_model")
 parser.add_argument("--enable_int8", default=False, action="store_true")
 parser.add_argument("--device_name")
-parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=15)
+parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=1)
 # 384, 640
-parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,640])
+parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,384])
 parser.add_argument("--cls_imgsz", type=int, nargs='+', default=[224,224])
 
 args = parser.parse_args()
 source = args.source
 print_metrics_interval = args.print_metrics_interval
-use_openvino_backend = args.use_openvino_backend
+disable_classification = args.disable_classification
+show_inference = args.show_inference
 cls_model_name = args.cls_model
 enable_cls_preprocessing = args.enable_cls_preprocessing
 show_gui = args.show
@@ -71,19 +75,45 @@ except:
     print("pyrealsense: no")
     pyrs = 0
 
-if device_name is None or device_name == "":
-    device_name = "GPU"
+try:
+    import intel_extension_for_pytorch as ipex
+    ipex_available = True
+except:
+    ipex_available = False
+    print("IPEX not available. CPU device will be used")
 
-if cls_model_name is None or cls_model_name == "" or "efficient" in cls_model_name:
+
+if device_name is None or device_name == "":
+    if ipex_available:
+        device_name = "xpu"
+    else:
+        device_name = "cpu"
+
+if "gpu" in device_name.lower():
+    if not ipex_available:
+        device_name = "cpu"
+    else:
+        device_name = "xpu"
+
+if cls_model_name is None or cls_model_name == "":
+    cls_model_name = "efficientnet-b0"
+else:
+    cls_model_name = cls_model_name.lower()
+
+if  "efficient" in cls_model_name:
     cls_model_name = "efficientnet-b0"
 elif "resnet" in cls_model_name:
     cls_model_name = "resnet50"
 else:
+    print("Specified cls_model_name is not supported; using efficientnet-b0 instead")
     cls_model_name = "efficientnet-b0"
+
 print("classification_model: ", cls_model_name)
 print("enable_int8: ", en_int8)
 print("device_name: ", device_name)
 print("show_gui: ", show_gui)
+print("show_inference: ", show_inference)
+print("print_metrics_interval (seconds): ", print_metrics_interval)
 
 if reclassify_interval < 1:
     print("reclassify_interval < 1 is not allowed. reclassify_interval reset to 1.")
@@ -419,57 +449,73 @@ def do_bit_on_roi(cls_model, roi, cls_imgsz, output_layer):
     result_index = np.argmax(result_infer)
     return result_index
 
-def do_efficientnet_on_roi(cls_model, roi, cls_imgsz, output_layer):
-    #print(roi.shape, " ", roi.size)
+eff_mean = np.array([ 0.5, 0.5, 0.5 ])
+eff_sigma = np.array([ 0.5, 0.5, 0.5 ])
+res_mean =  np.array([0.485, 0.456, 0.406])
+res_sigma = np.array([0.229, 0.224, 0.225])
 
-    # https://docs.openvino.ai/2022.3/omz_models_model_resnet_50_tf.html
-    if "efficientnet" in cls_model_name:
-        resized_roi = cv2.resize(roi, cls_imgsz, interpolation=cv2.INTER_LINEAR)
-        if not resized_roi.data.contiguous:
-            print("WARNING: imgage is not continous! Result may not be correct for inference.")
-        resized_roi = np.expand_dims(resized_roi, 0)
+def do_classification_on_roi(cls_model, roi, cls_imgsz):
+    if "efficient" in cls_model_name:
+        return do_efficientnet_on_roi(cls_model, roi, cls_imgsz, eff_mean, eff_sigma)
     elif "resnet" in cls_model_name:
-        mean = [0,0,0]
-        resized_roi = cv2.dnn.blobFromImage(roi, 1, (cls_imgsz[1],cls_imgsz[0]),mean,1, crop=False)
-    return cls_model_names[np.argmax(cls_model([resized_roi])[output_layer])]
+        return do_resnet_on_roi(cls_model, roi, cls_imgsz, res_mean, res_sigma)
+    else:
+        return "error: missing implementation"
 
-
-def do_yolo_on_frame(det_model, frame, det_imgsz, output_layer):    
-    #resized_roi = cv2.resize(frame, (det_imgsz[0], det_imgsz[1]), interpolation=cv2.INTER_LINEAR)
-    resized_roi = frame
-    resized_roi = cv2.dnn.blobFromImage(resized_roi, 1/255, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
-    res = det_model(resized_roi)[output_layer]
-    res = cv2.transpose(res[0])
+def do_efficientnet_on_roi(cls_model, roi, cls_imgsz, mean, sigma):
+    if not "efficientnet" in cls_model_name:
+        print("Invalid model for this procedure")
+        return "Undefined"
     
-    nmsThreshold = 0.6
-    confThreshold = 0.65
+    # OpenVINO source reference from: https://github.com/openvinotoolkit/open_model_zoo/tree/master/models/public/efficientnet-v2-b0
+    # Source Model: https://github.com/huggingface/pytorch-image-models
+    roi2 = np.array(roi)
+    roi2 = cv2.resize(roi2, (cls_imgsz))
+    roi2 = roi2 / 255
+    roi2 = (roi2 - mean)
+    roi2 = roi2 / sigma
+    roi2 = np.around(roi2, decimals=4)
+    roi2 = roi2.transpose((2,0,1))
+    roi2 = np.expand_dims(roi2,0)
+    resized_roi = torch.tensor(roi2).to(dtype=torch.float)
 
-    boxes = []
-    scores = []
-    classIds = []
-    for x in res:
-        confs = x[4:]
-        (min_conf, max_conf, min_loc, (x1, classIdIdx)) = cv2.minMaxLoc(confs)
-        if max_conf >= .65:
-            box = [x[0] - (0.5 * x[2]), x[1] - (0.5 * x[3]), x[2], x[3]]
-            boxes.append(box)
-            scores.append(max_conf)
-            classIds.append(classIdIdx)
+    with torch.no_grad():
+        output = cls_model(resized_roi.to(device_name))
 
-    scaleX = frame.shape[1] / det_imgsz[1] 
-    scaleY = frame.shape[0] / det_imgsz[0]
+    top1_probabilities, top1_class_indices = torch.topk(output.softmax(dim=1) * 100, k=1)
+    return cls_model_names[top1_class_indices[0]]
 
 
-    boxIds = cv2.dnn.NMSBoxes(boxes, scores, confThreshold, nmsThreshold) #, eta) 
+def do_resnet_on_roi(cls_model, roi, cls_imgsz, mean, sigma):
+    if not "resnet" in cls_model_name:
+        print("Invalid model for this procedure")
+        return "Undefined"
 
-    detections = []
-    results = []
-    for boxId in boxIds:
-        xyxy = [ round(boxes[boxId][0]*scaleX), round(boxes[boxId][1]*scaleY), round((boxes[boxId][2]+boxes[boxId][0])*scaleX), round((boxes[boxId][3]+boxes[boxId][1])*scaleY) ]
-        box = Box(xyxy, scores[boxId], classIds[boxId])
-        results.append({"boxes": [box]})
+    # OV Source: https://github.com/pytorch/vision/blob/main/test/test_image.py
+    # https://github.com/huggingface/pytorch-image-models/blob/ac3470188b914c5d7a5058a7e28b9eb685a62427/hfdocs/source/models/resnet.mdx#L206
+    # https://huggingface.co/timm/resnet50.a1_in1k
+    roi2 = roi 
+    roi2 = cv2.resize(roi2, (cls_imgsz) , interpolation=cv2.INTER_CUBIC)
+    roi2 = roi2 / 255
+    roi2 = (roi2 - mean)
+    roi2 = roi2 / sigma
+    roi2 = np.around(roi2, decimals=4)
+    roi2 = roi2.transpose((2,0,1))
+    roi2 = np.expand_dims(roi2,0)
+    resized_roi = torch.tensor(roi2).to(dtype=torch.float)
 
-    return results
+    with torch.no_grad():
+        output = cls_model(resized_roi.to(device_name))
+
+    top1_probabilities, top1_class_indices = torch.topk(output.softmax(dim=1) * 100, k=1)
+    return cls_model_names[top1_class_indices[0]]
+
+def do_yolo_on_frame(det_model, frame, det_imgsz): 
+    with torch.no_grad():
+        res = det_model(frame, imgsz=det_imgsz, verbose=False)
+        results = []
+        results.append({"boxes": res[0].boxes.to('cpu')})
+        return results
 
 def clear_shopping_cart():
     global genAiItems, rowGen, colGen,x,y
@@ -572,7 +618,7 @@ for s in source:
         pyrs = 0
         try:
             print("Loading video stream.")
-            cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
+            cap = cv2.VideoCapture(s, cv2.CAP_ANY)
             print("Video stream loaded.")
         except:
             print("Retrying loading video stream.")
@@ -586,71 +632,67 @@ det_model_names = ""
 with open("yolo-names.txt", "r") as text_file:
     det_model_names = ast.literal_eval(text_file.read())
 
-if en_int8:
-    model_name = "yolov8n-int8.xml"
-else:
-    model_name = "yolov8n.xml"
-
 print("Loading detection and classification models.")
-ov_config = {}
 #ov_model.reshape({0: [1,3,det_imgsz[0], det_imgsz[1]]})
 
 # Use if GPU or AUTO AND GPU AVAILABLE
 if "GPU" in device_name or "AUTO" == device_name:
-    ov_config = {"GPU_DISABLE_WINOGRAD_CONVOLUTION": "YES"}
+    ov_config = {"GPU_DISABLE_WINOGRAD_CONVOLUTION": "YES", "PERFORMANCE_HINT": "LATENCY111"}
 else:
-    ov_config = {}
+    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
 
-# Reference: https://docs.openvino.ai/2024/openvino-workflow/torch-compile.html
-model = torch.load("yolov8n.torchscript")
-if use_openvino_backend:    
-    model = torch.compile(
-                          model, 
-                          backend='openvino', 
-                          options={ "device": device_name, "config": ov_config }
-                         )
-    print("use_openvino_backend: yes")
-    #output_layer = model.output(0)
+#model = torch.load("yolov8n.torchscript")
+from ultralytics import YOLO
+
+model_name = "yolov8n"
+model = YOLO(model_name, verbose=False)
+
+if en_int8:
+    print("No quantized yolo model available. Ignoring --enable_int8")
+
+if ipex_available:    
+    import intel_extension_for_pytorch as ipex
+    model = model.to(device_name)
 
 # Classification model
 cls_model_names = ""
+cls_label = "N/A - disabled"
 
-if "efficientnet-b0" in cls_model_name:
+if not disable_classification and "efficientnet-b0" in cls_model_name:
     ## Efficientnet-B0
     with open("efficientnet.labels", "r") as text_file:
         cls_model_names = ast.literal_eval(text_file.read())
     if en_int8:
         print("No quantized efficientnet model available. Ignoring --enable_int8.")
-    cls_model = torch.load("efficientnet-b0.pt") 
+    # https://huggingface.co/timm/efficientnet_b0.ra4_e3600_r224_in1k
+    # https://github.com/huggingface/pytorch-image-models?tab=readme-ov-file
+    cls_model = timm.create_model('efficientnet_b0.ra4_e3600_r224_in1k', pretrained=True)
 
-elif "bit" in cls_model_name:
-    pass
+elif not disable_classification and "bit" in cls_model_name:
+    print("No BiT model available.")
+    quit()
     ## BiT: BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml
     #ov_cls_model.reshape({0:[1,64,64,3]})
-else:
+elif not disable_classification:
     ## Resnet-50
-    with open("resnet.labels", "r") as text_file:
+    with open("imgnet.labels", "r") as text_file:
         cls_model_names = ast.literal_eval(text_file.read())
     if en_int8:
-        cls_model = torch.load("resnet50-int8.pt")
+        print("No quantized resnet50 model available. Ignoring --enable_int8.")
     else:
-        cls_model = torch.load("resnet50.pt")
+        cls_model = timm.create_model('resnet50', pretrained=True)
 
+if not disable_classification:
+    cls_model.eval()
+    if ipex_available:
+        cls_model = cls_model.to(device_name)
 
-if use_openvino_backend:
-    cls_model = torch.compile(
-                                cls_model, 
-                                backend='openvino', 
-                                options={ "device": device_name,"config": ov_config }
-                             )
-        #cls_output_layer = cls_model.output(0)
-print("Detection and classification models loaded.")
-quit()
+print("Models loaded.")
 frame_count = 0
+total_frame_count = 0
 skip_frame_reclassify = False
 
 print("capturing video(s) from: ", source)
-print("Running ", model_name, " OpenVINO")
 #sfilter = ["banana", "apple", "orange", "broccoli", "carrot", "bottle"]
 #sfilter = ["bottle"]
 sfilter = ["person", "bottle"]
@@ -660,6 +702,8 @@ capIdx = 0
 avg_elapsed_time = 0
 max_elapsed_time = 0
 min_elapsed_time = 0
+immutable_start_time = time.time()
+start_time = time.time()
 
 while True:
     if pyrs == 0:
@@ -678,22 +722,10 @@ while True:
 
     annotated_frame = None
 
-    if capIdx == 0:
-        start_time = time.time()
 
-
-    # Add any GenAI results and render them in GenAI widget(s)
-    while not tracked_mqtt_results.empty():
-        trackid, res = tracked_mqtt_results.pop()
-        #resArr = res.split("|")
-        #print(trackid, res[0], res[1])
-        #updateGenAIResult(tabGenAIView, trackid, res, True)
-
-
-    results = do_yolo_on_frame(model, frame.copy(), det_imgsz, output_layer)    
+    results = do_yolo_on_frame(model, frame.copy(), det_imgsz) 
     send_lvlm_processing = True
 
-    #print("process results......", videoFrameWidth, " ", videoFrameHeight)
     if show_gui:
         annotated_frame = frame.copy()
 
@@ -711,22 +743,6 @@ while True:
         if not send_lvlm_processing:
             continue
 
-        #if show_gui:
-        #    do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label)
-            #annotated_frame = result.plot()
-
-
-        #print("No hand in pic-->", result_label, "person" in result_label)
-
-        # Add any GenAI results and render them in GenAI widget(s)
-        #while not tracked_mqtt_results.empty():
-        #    trackid, res = tracked_mqtt_results.pop()
-        #    #resArr = res.split("|")
-        #    print(trackid, res[0], res[1])
-        #    updateGenAIResult(tabGenAIView, trackid, res, True)
-
-
-        #for box, track_id in zip(boxes, track_ids):        
         for box in boxes:
             c, conf, id = int(box.cls), float(box.conf), None if box.id is None else int(box.id.item())
 
@@ -734,45 +750,67 @@ while True:
             origFrame = frame.copy()
 
 
-            roi = None #save_one_box(torch.tensor(box.xyxy), origFrame,BGR=True, save=False)
-            x = box.xyxy[0]
-            y = box.xyxy[1]
-            w = box.xyxy[2] 
-            h = box.xyxy[3]
+            roi = None 
+            xyxy = box.xyxy.numpy()[0]
+            x = int(xyxy[0])
+            y = int(xyxy[1])
+            w = int(xyxy[2])
+            h = int(xyxy[3])
             if x < 0:
                 x = 0
             if y < 0:
                 y = 0
+            #print(x, ", ", y, ", ", w, ", ", h)
 
-            roi = origFrame[int(y) : int(h), int(x) : int(w), :: (1 if "eff" in cls_model_name else -1)]
-            #cv2.imwrite("roi.jpg", roi)
+
+            roi = origFrame[int(y) : int(h), int(x) : int(w), :: 1] # (1 if "eff" in cls_model_name else -1)]
+#            cv2.imwrite("roi.jpg", roi)
+#            quit()
+
             result_label = det_model_names[c]
-            cls_label = do_efficientnet_on_roi(cls_model, roi, cls_imgsz, cls_output_layer)
+            #if result_label == "bottle":
+                #from ultralytics.utils.plotting import save_one_box
+                #roi2 = save_one_box(torch.tensor(box.xyxy), origFrame,BGR=1, save=True)
+                #cv2.imwrite("roi2.jpg", roi2)
+                #quit()
+
+            if not disable_classification:
+                cls_label = do_classification_on_roi(cls_model, roi, cls_imgsz)
             if show_gui:
                 do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label + ": " + cls_label)
             else:
-                print("Detected: ", result_label, " Classification: ", cls_label)
-            #result_label = cls_label
+                if show_inference:
+                    print("Detected: ", result_label, " Classification: ", cls_label)
 
 
     if capIdx == numOfCaps -1:
         capIdx = 0        
         frame_count = frame_count + 1
+        total_frame_count = total_frame_count + 1
         # Skip reclassification based on tracked objects and interval specified
         skip_frame_reclassify = frame_count % reclassify_interval != 0
 
         elapsed_time = time.time() - start_time
+        total_elapsed_time = time.time() - immutable_start_time
         if elapsed_time > max_elapsed_time:
             max_elapsed_time = elapsed_time
         if elapsed_time < min_elapsed_time or min_elapsed_time == 0:
             min_elapsed_time = elapsed_time
         avg_elapsed_time = elapsed_time + avg_elapsed_time
 
-        print_at_frame = print_metrics_interval
-        if frame_count % print_at_frame == 0:
+        if elapsed_time > print_metrics_interval:
+            from termcolor import colored
+
+            print(colored("--------------------------------------------------", 'blue'))
+            fps = "FPS: " + str(frame_count / elapsed_time)
+            ofps = "Overall FPS: " + str(total_frame_count / total_elapsed_time)
+            print(colored(fps, 'light_green'))
+            print(colored(ofps, 'light_green'))
             print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
             print("Max latency: ", max_elapsed_time, "ms")
             print("Min latency: ", min_elapsed_time, " ms")
+            start_time = time.time()
+            frame_count = 0
                                         
     else:
         capIdx = capIdx + 1
@@ -781,9 +819,6 @@ while True:
     if show_gui and capIdx == 0:
         if annotated_frame is None:
             annotated_frame = frame
-
-        #cv2.imshow("YOLOv8 " + tracker + " Tracking" + " with OpenVINO" if use_openvino else "", annotated_frame)
-        #print("Frame info: " , annotated_frame.shape, " ", videoFrameWidth, " ", videoFrameHeight)
 
         matImg = cv2.resize(annotated_frame, (videoFrameWidth,videoFrameHeight), interpolation=cv2.INTER_LINEAR)
         b,g,r = cv2.split(matImg)
@@ -794,8 +829,7 @@ while True:
             vidPicture.configure(image = imgtkk)
             vidPicture.image = imgtkk
         else:
-            vidPicture = tkinter.Label(videoFrame, text=" ") #, image=imgtkk)
-        #vidPicture.image = imgtkk
+            vidPicture = tkinter.Label(videoFrame, text=" ") 
         vidPicture.grid(row=0,column=0, sticky=tkinter.W)
         vidPicture.update_idletasks()
         vidPicture.update()
