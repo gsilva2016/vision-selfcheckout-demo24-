@@ -77,9 +77,12 @@ ARG INCLUDE_NPU
 
 RUN if [ "$INCLUDE_NPU" = "Y" ]; then echo "NPU: Yes" && sleep 2 && mkdir npu-drivers && cd npu-drivers && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-driver-compiler-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-fw-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/intel/linux-npu-driver/releases/download/v1.1.0/intel-level-zero-npu_1.1.0.20231117-6904283384_ubuntu22.04_amd64.deb && wget https://github.com/oneapi-src/level-zero/releases/download/v1.10.0/level-zero_1.10.0+u22.04_amd64.deb && dpkg -i *.deb; else echo "NPU: No" && sleep 2; fi
 
+ARG INCLUDE_YOLONAS
+RUN if [ "$INCLUDE_YOLONAS" = "Y" ]; then echo "YOLO_NAS: Yes" && sleep 2 && pip install super_gradients; else echo "YOLO_NAS: No" && sleep 2; fi
+
 #RUN cd /opt/intel/openvino/samples/cpp; ./build_samples.sh
 
-RUN pip install pillow
+RUN pip install pillow "termcolor>=2.4.0"
 # Remove OpenCV from ultralytics install
 #RUN pip uninstall opencv-python -y
 

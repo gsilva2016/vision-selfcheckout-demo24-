@@ -36,26 +36,33 @@ parser.add_argument("--enable_cls_preprocessing", default=False, action="store_t
 parser.add_argument("--reclassify_interval", nargs="?", type=int, default=1)
 parser.add_argument("--max_tracked_objects", nargs="?", type=int, default=20)
 parser.add_argument("--show", default=False, action="store_true")
+parser.add_argument("--show_inference", default=False, action="store_true")
 parser.add_argument("--cls_model")
 parser.add_argument("--enable_int8", default=False, action="store_true")
 parser.add_argument("--device_name")
-parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=15)
+parser.add_argument("--disable_yolonas", default=False, action="store_true")
+parser.add_argument("--disable_classification", default=False, action="store_true")
+parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=1)
 # 384, 640
-parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,640])
+parser.add_argument("--det_imgsz", type=int, nargs='+', default=[640,640])
 parser.add_argument("--cls_imgsz", type=int, nargs='+', default=[224,224])
 
 args = parser.parse_args()
 source = args.source
+disable_yolonas = args.disable_yolonas
+disable_classification = args.disable_classification
 print_metrics_interval = args.print_metrics_interval
 cls_model_name = args.cls_model
 enable_cls_preprocessing = args.enable_cls_preprocessing
 show_gui = args.show
+show_inference = args.show_inference
 reclassify_interval = args.reclassify_interval
 max_tracked_objects = args.max_tracked_objects
 det_imgsz = args.det_imgsz
 cls_imgsz = args.cls_imgsz
 en_int8 = args.enable_int8
 device_name = args.device_name
+
 
 try:
     pyrs = 1
@@ -65,19 +72,36 @@ except:
     print("pyrealsense: no")
     pyrs = 0
 
+use_yolonas = 0
+
+try:
+    if not disable_yolonas:
+        use_yolonas = 1
+        from super_gradients.training import models
+        from super_gradients.common.object_names import Models
+        print("use_yolonas: yes")
+except:
+    print("use_yolonas: no")
+
 if device_name is None or device_name == "":
     device_name = "GPU"
 
-if cls_model_name is None or cls_model_name == "" or "efficient" in cls_model_name:
+if cls_model_name is None or cls_model_name == "":
     cls_model_name = "efficientnet-b0.xml"
-elif "resnet" in cls_model_name:
+elif "efficient" in cls_model_name.lower():
+    cls_model_name = "efficientnet-b0.xml"
+elif "resnet" in cls_model_name.lower():
     cls_model_name = "resnet-50-tf_i8.xml"
 else:
     cls_model_name = "efficientnet-b0.xml"
+
 print("classification_model: ", cls_model_name)
 print("enable_int8: ", en_int8)
 print("device_name: ", device_name)
 print("show_gui: ", show_gui)
+print("show_inference: ", show_inference)
+print("print_metrics_interval (seconds): ", print_metrics_interval)
+print("det_imgsz", det_imgsz)
 
 if reclassify_interval < 1:
     print("reclassify_interval < 1 is not allowed. reclassify_interval reset to 1.")
@@ -431,31 +455,53 @@ def do_efficientnet_on_roi(cls_model, roi, cls_imgsz, output_layer):
 def do_yolo_on_frame(det_model, frame, det_imgsz, output_layer):    
     #resized_roi = cv2.resize(frame, (det_imgsz[0], det_imgsz[1]), interpolation=cv2.INTER_LINEAR)
     resized_roi = frame
-    resized_roi = cv2.dnn.blobFromImage(resized_roi, 1/255, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
-    res = det_model(resized_roi)[output_layer]
-    res = cv2.transpose(res[0])
-    
+    scaleX = frame.shape[1] / det_imgsz[1]
+    scaleY = frame.shape[0] / det_imgsz[0]
     nmsThreshold = 0.6
     confThreshold = 0.65
-
     boxes = []
     scores = []
     classIds = []
-    for x in res:
-        confs = x[4:]
-        (min_conf, max_conf, min_loc, (x1, classIdIdx)) = cv2.minMaxLoc(confs)
-        if max_conf >= .65:
-            box = [x[0] - (0.5 * x[2]), x[1] - (0.5 * x[3]), x[2], x[3]]
-            boxes.append(box)
-            scores.append(max_conf)
-            classIds.append(classIdIdx)
 
-    scaleX = frame.shape[1] / det_imgsz[1] 
-    scaleY = frame.shape[0] / det_imgsz[0]
+    if use_yolonas:
+        resized_roi = cv2.dnn.blobFromImage(resized_roi, 1, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
+        res = det_model(resized_roi)
+        num_preds_layer = det_model.output(0)
+        pred_boxes_layer = det_model.output(1)
+        pred_score_layer = det_model.output(2)
+        pred_class_layer = det_model.output(3)
 
+        num_boxes = res[num_preds_layer][0][0]
+        for x in range(0, num_boxes):
+#        pred_boxes = res[pred_boxes_layer]
+            pred_score = res[pred_score_layer][0][x]
+            if pred_score >= confThreshold:
+                box = res[pred_boxes_layer][0][x]
+                box[2] = box[2] - box[0]
+                box[3] = box[3] - box[1]
+                classIdIdx = res[pred_class_layer][0][x]
+                boxes.append(box)
+                scores.append(pred_score)
+                classIds.append(classIdIdx)
+#                print(box)
+#                quit()
+    else:
+        resized_roi = cv2.dnn.blobFromImage(resized_roi, 1/255, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
+        res = det_model(resized_roi)[output_layer]
+        res = cv2.transpose(res[0])
+    
+        for x in res:
+            confs = x[4:]
+            (min_conf, max_conf, min_loc, (x1, classIdIdx)) = cv2.minMaxLoc(confs)
+            if max_conf >= confThreshold:
+                box = [x[0] - (0.5 * x[2]), x[1] - (0.5 * x[3]), x[2], x[3]]
+                boxes.append(box)
+ #               print(box)
+ #               quit()
+                scores.append(max_conf)
+                classIds.append(classIdIdx)
 
     boxIds = cv2.dnn.NMSBoxes(boxes, scores, confThreshold, nmsThreshold) #, eta) 
-
     detections = []
     results = []
     for boxId in boxIds:
@@ -566,11 +612,12 @@ for s in source:
         pyrs = 0
         try:
             print("Loading video stream.")
-            cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
+            #cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
+            cap = cv2.VideoCapture(s, cv2.CAP_ANY)
             print("Video stream loaded.")
         except:
             print("Retrying loading video stream.")
-            cap = cv2.VideoCapture(s, cv2.CAP_GSTREAMER)
+            cap = cv2.VideoCapture(s, cv2.CAP_ANY)
             print("Video stream loaded.")
     if cap:
         caps.append(cap)
@@ -580,12 +627,21 @@ det_model_names = ""
 with open("yolo-names.txt", "r") as text_file:
     det_model_names = ast.literal_eval(text_file.read())
 
-if en_int8:
-    model_name = "yolov8n-int8.xml"
+if use_yolonas:
+    model = models.get(Models.YOLO_NAS_S, pretrained_weights="coco")
+    model.export(output="yolo-nas.onnx")
+    model_name = "yolo-nas.onnx"
+    if en_int8:
+        print("en_int8: N/A")
+        print("en_int8 for yolo-nas is not supported.")
+        quit()
 else:
-    model_name = "yolov8n.xml"
+    if en_int8:
+        model_name = "yolov8n-int8.xml"
+    else:
+        model_name = "yolov8n.xml"
 
-print("Loading detection and classification models.")
+print("Loading models.")
 from openvino.runtime import Core
 ie = Core()
 ov_model = ie.read_model(model_name)
@@ -594,33 +650,36 @@ ov_model.reshape({0: [1,3,det_imgsz[0], det_imgsz[1]]})
 
 # Use if GPU or AUTO AND GPU AVAILABLE
 if "GPU" in device_name or "AUTO" == device_name:
-    ov_config = {"GPU_DISABLE_WINOGRAD_CONVOLUTION": "YES"}
+    ov_config = {"GPU_DISABLE_WINOGRAD_CONVOLUTION": "YES", "PERFORMANCE_HINT": "LATENCY"}
 else:
-    ov_config = {}
+    ov_config = {"PERFORMANCE_HINT": "LATENCY"}
 model = ie.compile_model(ov_model, config=ov_config, device_name=device_name)
 output_layer = model.output(0)
 
 # Classification model
 cls_model_names = ""
-ov_cls_model = ie.read_model(model=cls_model_name)
+if not disable_classification:
+    ov_cls_model = ie.read_model(model=cls_model_name)
 
-if cls_model_name == "efficientnet-b0.xml":
-    ## Efficientnet-B0
-    with open("efficientnet.labels", "r") as text_file:
-        cls_model_names = ast.literal_eval(text_file.read())
-elif "bit" in cls_model_name:
-    ## BiT: BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml
-    ov_cls_model.reshape({0:[1,64,64,3]})
-else:
-    ## Resnet-50
-    with open("resnet.labels", "r") as text_file:
-        cls_model_names = ast.literal_eval(text_file.read())
+    if cls_model_name == "efficientnet-b0.xml":
+        ## Efficientnet-B0
+        with open("efficientnet.labels", "r") as text_file:
+            cls_model_names = ast.literal_eval(text_file.read())
+    elif "bit" in cls_model_name:
+        ## BiT: BiT_M_R50x1_10C_50e_IR/1/FP32/64_64_3/model_64_64_3.xml
+        ov_cls_model.reshape({0:[1,64,64,3]})
+    else:
+        ## Resnet-50
+        with open("resnet.labels", "r") as text_file:
+            cls_model_names = ast.literal_eval(text_file.read())
 
-cls_model = ie.compile_model(model=ov_cls_model, device_name=device_name, config=ov_config)
-cls_output_layer = cls_model.output(0)
-print("Detection and classification models loaded.")
+    cls_model = ie.compile_model(model=ov_cls_model, device_name=device_name, config=ov_config)
+    cls_output_layer = cls_model.output(0)
+
+print("Models loaded.")
 
 frame_count = 0
+total_frame_count = 0
 skip_frame_reclassify = False
 
 print("capturing video(s) from: ", source)
@@ -634,6 +693,8 @@ capIdx = 0
 avg_elapsed_time = 0
 max_elapsed_time = 0
 min_elapsed_time = 0
+immutable_start_time = time.time()
+start_time = time.time()
 
 while True:
     if pyrs == 0:
@@ -651,10 +712,6 @@ while True:
 
 
     annotated_frame = None
-
-    if capIdx == 0:
-        start_time = time.time()
-
 
     # Add any GenAI results and render them in GenAI widget(s)
     while not tracked_mqtt_results.empty():
@@ -721,32 +778,44 @@ while True:
             roi = origFrame[int(y) : int(h), int(x) : int(w), :: (1 if "eff" in cls_model_name else -1)]
             #cv2.imwrite("roi.jpg", roi)
             result_label = det_model_names[c]
-            cls_label = do_efficientnet_on_roi(cls_model, roi, cls_imgsz, cls_output_layer)
+            if not disable_classification:
+                cls_label = do_efficientnet_on_roi(cls_model, roi, cls_imgsz, cls_output_layer)
+            else:
+                cls_label = "N/A - disabled"
+
             if show_gui:
                 do_update_annotated_frame_detection(annotated_frame, det_imgsz, box.xyxy, result_label + ": " + cls_label)
             else:
-                print("Detected: ", result_label, " Classification: ", cls_label)
-            #result_label = cls_label
-
+                if show_inference:
+                    print("Detected: ", result_label, " Classification: ", cls_label)
 
     if capIdx == numOfCaps -1:
         capIdx = 0        
         frame_count = frame_count + 1
+        total_frame_count = total_frame_count + 1
         # Skip reclassification based on tracked objects and interval specified
         skip_frame_reclassify = frame_count % reclassify_interval != 0
 
         elapsed_time = time.time() - start_time
+        total_elapsed_time = time.time() - immutable_start_time
         if elapsed_time > max_elapsed_time:
             max_elapsed_time = elapsed_time
         if elapsed_time < min_elapsed_time or min_elapsed_time == 0:
             min_elapsed_time = elapsed_time
         avg_elapsed_time = elapsed_time + avg_elapsed_time
 
-        print_at_frame = print_metrics_interval
-        if frame_count % print_at_frame == 0:
+        if elapsed_time > print_metrics_interval:
+            from termcolor import colored
+            print(colored("--------------------------------------------------", 'blue'))
+            fps = "FPS: " + str(frame_count / elapsed_time)
+            ofps = "Overall FPS: " + str(total_frame_count / total_elapsed_time)
+            print(colored(fps, 'light_green'))
+            print(colored(ofps, 'light_green'))
             print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
             print("Max latency: ", max_elapsed_time, "ms")
             print("Min latency: ", min_elapsed_time, " ms")
+            start_time = time.time()
+            frame_count = 0
                                         
     else:
         capIdx = capIdx + 1

@@ -10,7 +10,12 @@ then
 	INCLUDE_NPU=N
 fi
 
-docker build -t yolo-demo-openvino:1.0 --build-arg "INCLUDE_NPU=$INCLUDE_NPU" --build-arg "INCLUDE_REALSENSE=$INCLUDE_REALSENSE" -f Dockerfile.openvino .
+if [ "$INCLUDE_YOLONAS" != "Y" ]
+then
+	INCLUDE_YOLONAS=N
+fi
+
+docker build -t yolo-demo-openvino:1.0 --build-arg "INCLUDE_YOLONAS=$INCLUDE_YOLONAS" --build-arg "INCLUDE_NPU=$INCLUDE_NPU" --build-arg "INCLUDE_REALSENSE=$INCLUDE_REALSENSE" -f Dockerfile.openvino .
 
 docker build -t yolo-demo-torch:1.0 --build-arg "USE_IPEX=N" --build-arg "INCLUDE_NPU=$INCLUDE_NPU" --build-arg "INCLUDE_REALSENSE=$INCLUDE_REALSENSE" -f Dockerfile.torch .
 

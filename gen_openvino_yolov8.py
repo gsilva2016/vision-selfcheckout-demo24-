@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 
 model_name = "yolov8n.pt"
-det_imgsz = (384,384)
+det_imgsz = (640,640)
 model = YOLO(model_name)
 model_names = model.names
 
