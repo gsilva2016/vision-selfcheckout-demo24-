@@ -41,6 +41,7 @@ parser.add_argument("--source", "-s", action='append', help='USB or RTSP or FILE
 parser.add_argument("--enable_cls_preprocessing", default=False, action="store_true")
 parser.add_argument("--show_inference", default=False, action="store_true")
 parser.add_argument("--disable_classification", default=False, action="store_true")
+parser.add_argument("--disable_yolonas", default=False, action="store_true")
 parser.add_argument("--reclassify_interval", nargs="?", type=int, default=1)
 parser.add_argument("--max_tracked_objects", nargs="?", type=int, default=20)
 parser.add_argument("--show", default=False, action="store_true")
@@ -49,11 +50,12 @@ parser.add_argument("--enable_int8", default=False, action="store_true")
 parser.add_argument("--device_name")
 parser.add_argument("--print_metrics_interval", nargs="?", type=int, default=1)
 # 384, 640
-parser.add_argument("--det_imgsz", type=int, nargs='+', default=[384,384])
+parser.add_argument("--det_imgsz", type=int, nargs='+', default=[640,640])
 parser.add_argument("--cls_imgsz", type=int, nargs='+', default=[224,224])
 
 args = parser.parse_args()
 source = args.source
+disable_yolonas = args.disable_yolonas
 print_metrics_interval = args.print_metrics_interval
 disable_classification = args.disable_classification
 show_inference = args.show_inference
@@ -80,8 +82,18 @@ try:
     ipex_available = True
 except:
     ipex_available = False
-    print("IPEX not available. CPU device will be used")
+    print("IPEX not available.")
 
+use_yolonas = 0
+
+try:
+    if not disable_yolonas:
+        use_yolonas = 1
+        from super_gradients.training import models
+        from super_gradients.common.object_names import Models
+        print("use_yolonas: yes")
+except:
+    print("use_yolonas: no")
 
 if device_name is None or device_name == "":
     if ipex_available:
@@ -89,9 +101,12 @@ if device_name is None or device_name == "":
     else:
         device_name = "cpu"
 
-if "gpu" in device_name.lower():
+
+device_name = device_name.lower()
+if "gpu" in device_name or "xpu" in device_name:
     if not ipex_available:
-        device_name = "cpu"
+        print("XPU not available")
+        quit()
     else:
         device_name = "xpu"
 
@@ -114,6 +129,7 @@ print("device_name: ", device_name)
 print("show_gui: ", show_gui)
 print("show_inference: ", show_inference)
 print("print_metrics_interval (seconds): ", print_metrics_interval)
+print("det_imgsz: ", det_imgsz)
 
 if reclassify_interval < 1:
     print("reclassify_interval < 1 is not allowed. reclassify_interval reset to 1.")
@@ -510,11 +526,97 @@ def do_resnet_on_roi(cls_model, roi, cls_imgsz, mean, sigma):
     top1_probabilities, top1_class_indices = torch.topk(output.softmax(dim=1) * 100, k=1)
     return cls_model_names[top1_class_indices[0]]
 
-def do_yolo_on_frame(det_model, frame, det_imgsz): 
+#yolonas_mean = np.array([123.675, 116.28, 103.53])
+#yolonas_std = np.array([58.395, 57.12, 57.375])
+def do_yolo_on_frame(det_model, frame, det_imgsz):
+
+    results = []
+    nmsThreshold = 0.6
+    confThreshold = 0.65
+    boxes = []
+    scores = []
+    classIds = []
+    scaleX = frame.shape[1] / det_imgsz[1]
+    scaleY = frame.shape[0] / det_imgsz[0]
+    nms_top_k = 10
+
     with torch.no_grad():
-        res = det_model(frame, imgsz=det_imgsz, verbose=False)
-        results = []
-        results.append({"boxes": res[0].boxes.to('cpu')})
+        if use_yolonas:
+            resized_roi = cv2.dnn.blobFromImage(frame, 1/255, (det_imgsz[1],det_imgsz[0]),[0,0,0],1, crop=False)
+#            resized_roi = cv2.resize(frame, det_imgsz, interpolation=cv2.INTER_LINEAR)
+#            resized_roi = resized_roi / 255
+#            resized_roi = resized_roi - yolonas_mean
+#            resized_roi = resized_roi / yolonas_std
+#            resized_roi = resized_roi.transpose((2,0,1))
+#            resized_roi = resized_roi.astype(np.float32)
+#            resized_roi = np.expand_dims(resized_roi, 0)
+#            print(torch.tensor(resized_roi).shape)
+#            model.predict(resized_roi, conf=.6)
+#            quit()
+            res = model(torch.tensor(resized_roi).to(device_name))[0]
+            for pred_bboxes, pred_scores in zip(*res):
+                pred_bboxes = pred_bboxes.float()
+                pred_scores = pred_scores.float()
+                i, j = (pred_scores > confThreshold).nonzero(as_tuple=False).T
+                pred_bboxes = pred_bboxes[i]
+                pred_cls_conf = pred_scores[i, j]
+                pred_cls_label = j[:]
+
+                # Filter topk
+                if pred_cls_conf.size(0) > nms_top_k:
+                    topk_candidates = torch.topk(pred_cls_conf, k=nms_top_k, largest=True)
+                    pred_cls_conf = pred_cls_conf[topk_candidates.indices]
+                    pred_cls_label = pred_cls_label[topk_candidates.indices]
+                    pred_bboxes = pred_bboxes[topk_candidates.indices, :]
+                
+                #if pred_cls_conf.size(0) > 1:
+                    #print(pred_bboxes, " box added")
+                    #print(pred_cls_label, " , " , pred_cls_conf)
+                    #quit()
+
+
+
+                # NMS
+                idx_to_keep = cv2.dnn.NMSBoxes(pred_bboxes.to('cpu').numpy(), pred_cls_conf.to('cpu').numpy(), confThreshold, nmsThreshold)
+                pred_cls_conf = pred_cls_conf[idx_to_keep].unsqueeze(-1)
+                pred_cls_label = pred_cls_label[idx_to_keep].unsqueeze(-1)
+                pred_bboxes = pred_bboxes[idx_to_keep, :]
+
+                for x in range(0, len(pred_bboxes)):
+                    xyxy = pred_bboxes[x][0]* scaleX, pred_bboxes[x][1] * scaleY, pred_bboxes[x][2] * scaleX, pred_bboxes[x][3] * scaleY
+                    box = Box(xyxy, pred_cls_conf[x], pred_cls_label[x])
+                    results.append({"boxes": [box]})
+
+                #  nx6 (x1, y1, x2, y2, confidence, class) in pixel units
+                #final_boxes = torch.cat([pred_bboxes, pred_cls_conf, pred_cls_label], dim=1)  # [N,6]
+#                print(final_boxes, " ... cls: ", pred_cls_label, "....", pred_cls_conf)
+                #print(pred_cls_label, " -> ", pred_cls_conf)                
+#                quit()
+                
+            return results
+            res = res.prediction
+            num_boxes = len(res.bboxes_xyxy)
+            for x in range(0, num_boxes):
+                pred_score = res.confidence[x]
+                if pred_score >= confThreshold:
+                    box = res.bboxes_xyxy[x]
+#                    print(box)
+                    box[2] = round(box[2] * scaleX)
+                    box[3] = round(box[3] * scaleY)
+                    box[1] = round(box[1] * scaleY)
+                    box[0] = round(box[0] * scaleX)
+                    classIdIdx = res.labels[x]
+                    box = Box(box, pred_score, classIdIdx)
+                    results.append({"boxes": [box]})
+
+                    #boxes.append(box)
+                    #scores.append(pred_score)
+                    #classIds.append(classIdIdx)
+                    #detections = []
+            #results.append({"boxes": res.boxes.to('cpu')})
+        else:
+            res = det_model(frame, imgsz=det_imgsz, verbose=False)
+            results.append({"boxes": res[0].boxes.to('cpu')})
         return results
 
 def clear_shopping_cart():
@@ -641,14 +743,17 @@ if "GPU" in device_name or "AUTO" == device_name:
 else:
     ov_config = {"PERFORMANCE_HINT": "LATENCY"}
 
-#model = torch.load("yolov8n.torchscript")
-from ultralytics import YOLO
-
-model_name = "yolov8n"
-model = YOLO(model_name, verbose=False)
+if use_yolonas:
+    model = models.get(Models.YOLO_NAS_S, pretrained_weights="coco").to('cpu').eval()
+    model.prep_model_for_conversion(det_imgsz)
+else:
+    from ultralytics import YOLO
+    model_name = "yolov8n"
+    model = YOLO(model_name, verbose=False)
 
 if en_int8:
-    print("No quantized yolo model available. Ignoring --enable_int8")
+    print("No quantized yolo model supported.")
+    quit()
 
 if ipex_available:    
     import intel_extension_for_pytorch as ipex
@@ -699,7 +804,6 @@ sfilter = ["person", "bottle"]
 vidPicture = None
 numOfCaps = len(source)
 capIdx = 0
-avg_elapsed_time = 0
 max_elapsed_time = 0
 min_elapsed_time = 0
 immutable_start_time = time.time()
@@ -751,7 +855,10 @@ while True:
 
 
             roi = None 
-            xyxy = box.xyxy.numpy()[0]
+            if use_yolonas:
+                xyxy = box.xyxy
+            else:
+                xyxy = box.xyxy.numpy()[0]
             x = int(xyxy[0])
             y = int(xyxy[1])
             w = int(xyxy[2])
@@ -760,7 +867,9 @@ while True:
                 x = 0
             if y < 0:
                 y = 0
-            #print(x, ", ", y, ", ", w, ", ", h)
+
+
+#            print(x, ", ", y, ", ", w, ", ", h)
 
 
             roi = origFrame[int(y) : int(h), int(x) : int(w), :: 1] # (1 if "eff" in cls_model_name else -1)]
@@ -783,8 +892,7 @@ while True:
                     print("Detected: ", result_label, " Classification: ", cls_label)
 
 
-    if capIdx == numOfCaps -1:
-        capIdx = 0        
+    if True:
         frame_count = frame_count + 1
         total_frame_count = total_frame_count + 1
         # Skip reclassification based on tracked objects and interval specified
@@ -796,7 +904,6 @@ while True:
             max_elapsed_time = elapsed_time
         if elapsed_time < min_elapsed_time or min_elapsed_time == 0:
             min_elapsed_time = elapsed_time
-        avg_elapsed_time = elapsed_time + avg_elapsed_time
 
         if elapsed_time > print_metrics_interval:
             from termcolor import colored
@@ -806,9 +913,9 @@ while True:
             ofps = "Overall FPS: " + str(total_frame_count / total_elapsed_time)
             print(colored(fps, 'light_green'))
             print(colored(ofps, 'light_green'))
-            print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
-            print("Max latency: ", max_elapsed_time, "ms")
-            print("Min latency: ", min_elapsed_time, " ms")
+            print("Average latency: ", (total_elapsed_time * 1000) / total_frame_count, " ms")
+            print("Max latency: ", max_elapsed_time * 1000, "ms")
+            print("Min latency: ", min_elapsed_time * 1000, " ms")
             start_time = time.time()
             frame_count = 0
                                         
