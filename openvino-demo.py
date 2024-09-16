@@ -689,7 +689,6 @@ print("Running ", model_name, " OpenVINO")
 sfilter = ["person", "bottle"]
 vidPicture = None
 numOfCaps = len(source)
-capIdx = 0
 avg_elapsed_time = 0
 max_elapsed_time = 0
 min_elapsed_time = 0
@@ -698,7 +697,7 @@ start_time = time.time()
 
 while True:
     if pyrs == 0:
-        cap = caps[capIdx]
+        cap = caps[0]
         success, frame = cap.read()
         if not cap.isOpened() or not success:
             print('video feed done...')
@@ -789,8 +788,7 @@ while True:
                 if show_inference:
                     print("Detected: ", result_label, " Classification: ", cls_label)
 
-    if capIdx == numOfCaps -1:
-        capIdx = 0        
+    if True:
         frame_count = frame_count + 1
         total_frame_count = total_frame_count + 1
         # Skip reclassification based on tracked objects and interval specified
@@ -802,7 +800,6 @@ while True:
             max_elapsed_time = elapsed_time
         if elapsed_time < min_elapsed_time or min_elapsed_time == 0:
             min_elapsed_time = elapsed_time
-        avg_elapsed_time = elapsed_time + avg_elapsed_time
 
         if elapsed_time > print_metrics_interval:
             from termcolor import colored
@@ -811,17 +808,15 @@ while True:
             ofps = "Overall FPS: " + str(total_frame_count / total_elapsed_time)
             print(colored(fps, 'light_green'))
             print(colored(ofps, 'light_green'))
-            print("Average latency: ",  avg_elapsed_time/frame_count, " ms")
-            print("Max latency: ", max_elapsed_time, "ms")
-            print("Min latency: ", min_elapsed_time, " ms")
+            print("Average latency: ", (total_elapsed_time * 1000) / total_frame_count, " ms")
+            print("Max latency: ", max_elapsed_time * 1000, "ms")
+            print("Min latency: ", min_elapsed_time * 1000, " ms")
             start_time = time.time()
             frame_count = 0
                                         
-    else:
-        capIdx = capIdx + 1
 
     # Display the annotated frame
-    if show_gui and capIdx == 0:
+    if show_gui:
         if annotated_frame is None:
             annotated_frame = frame
 
